@@ -73,6 +73,11 @@ class WaymoScenarioDataset(Dataset):
         agent_type = []
         agent_id = []
 
+        # 在每个agent的所有时刻状态前，增加速度相关list
+        past_velocity_x, past_velocity_y = [], []
+        current_velocity_x, current_velocity_y = [], []
+        future_velocity_x, future_velocity_y = [], []
+
         # 遍历每个agent
         for agent_idx, track in enumerate(scenario.tracks):
             # agent id
@@ -95,6 +100,10 @@ class WaymoScenarioDataset(Dataset):
             fl, fw, fh, fyaw = [], [], [], []
             fvalid = []
 
+            pvx, pvy = [], []
+            cvx, cvy = [], []
+            fvx, fvy = [], []
+
             for t, state in enumerate(track.states):
                 # 这里假设current_time_index前为past，等于为current，后为future
                 if t < scenario.current_time_index:
@@ -106,6 +115,8 @@ class WaymoScenarioDataset(Dataset):
                     ph.append(state.height)
                     pyaw.append(state.heading)
                     pvalid.append(state.valid)
+                    pvx.append(state.velocity_x)
+                    pvy.append(state.velocity_y)
                 elif t == scenario.current_time_index:
                     cx.append(state.center_x)
                     cy.append(state.center_y)
@@ -116,6 +127,8 @@ class WaymoScenarioDataset(Dataset):
                     cyaw.append(state.heading)
                     cvalid.append(state.valid)
                     cts.append(scenario.timestamps_seconds[t])
+                    cvx.append(state.velocity_x)
+                    cvy.append(state.velocity_y)
                 else:
                     fx.append(state.center_x)
                     fy.append(state.center_y)
@@ -125,6 +138,8 @@ class WaymoScenarioDataset(Dataset):
                     fh.append(state.height)
                     fyaw.append(state.heading)
                     fvalid.append(state.valid)
+                    fvx.append(state.velocity_x)
+                    fvy.append(state.velocity_y)
 
             # 填充到总list
             past_x.append(px)
@@ -135,6 +150,9 @@ class WaymoScenarioDataset(Dataset):
             past_height.append(ph)
             past_bbox_yaw.append(pyaw)
             past_valid.append(pvalid)
+            past_velocity_x.append(pvx)
+            past_velocity_y.append(pvy)
+
 
             current_x.append(cx)
             current_y.append(cy)
@@ -145,6 +163,9 @@ class WaymoScenarioDataset(Dataset):
             current_bbox_yaw.append(cyaw)
             current_valid.append(cvalid)
             current_timestamp_micros.append(cts)
+            current_velocity_x.append(cvx)
+            current_velocity_y.append(cvy)
+
 
             future_x.append(fx)
             future_y.append(fy)
@@ -154,6 +175,8 @@ class WaymoScenarioDataset(Dataset):
             future_height.append(fh)
             future_bbox_yaw.append(fyaw)
             future_valid.append(fvalid)
+            future_velocity_x.append(fvx)
+            future_velocity_y.append(fvy)
 
         # roadgraph相关（这里只做简单示例，具体字段需查 scenario.map_features）
         feature_type_map = {
@@ -199,6 +222,8 @@ class WaymoScenarioDataset(Dataset):
             'past_width': to_tensor(past_width),
             'past_height': to_tensor(past_height),
             'past_bbox_yaw': to_tensor(past_bbox_yaw),
+            'past_velocity_x': to_tensor(past_velocity_x),
+            'past_velocity_y': to_tensor(past_velocity_y),
 
             'current_x': to_tensor(current_x),
             'current_y': to_tensor(current_y),
@@ -209,6 +234,8 @@ class WaymoScenarioDataset(Dataset):
             'current_timestamp_micros': to_tensor(current_timestamp_micros),
             'current_height': to_tensor(current_height),
             'current_bbox_yaw': to_tensor(current_bbox_yaw),
+            'current_velocity_x': to_tensor(current_velocity_x),
+            'current_velocity_y': to_tensor(current_velocity_y),
 
             'future_x': to_tensor(future_x),
             'future_y': to_tensor(future_y),
@@ -218,6 +245,8 @@ class WaymoScenarioDataset(Dataset):
             'future_width': to_tensor(future_width),
             'future_height': to_tensor(future_height),
             'future_bbox_yaw': to_tensor(future_bbox_yaw),
+            'future_velocity_x': to_tensor(future_velocity_x),
+            'future_velocity_y': to_tensor(future_velocity_y),
 
             'is_sdc': to_int_tensor(is_sdc),
             'agent_type': to_int_tensor(agent_type),

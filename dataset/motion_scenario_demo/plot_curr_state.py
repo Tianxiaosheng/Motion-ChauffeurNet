@@ -106,12 +106,14 @@ def visualize_one_step(states,
     masked_widths = agent_info['widths'][mask]
     masked_yaws = agent_info['yaws'][mask]
     masked_is_sdc = agent_info['is_sdc'][mask]
+    masked_agent_ids = agent_info['agent_id'][mask]
   else:
     # 如果没有提供智能体信息，使用默认值
     masked_lengths = np.ones_like(masked_x) * 4.0  # 默认长度4米
     masked_widths = np.ones_like(masked_x) * 2.0   # 默认宽度2米
     masked_yaws = np.zeros_like(masked_x)          # 默认朝向0度
     masked_is_sdc = np.zeros_like(masked_x, dtype=bool)  # 默认都不是SDC
+    masked_agent_ids = np.arange(len(masked_x))
 
   # 绘制智能体矩形（支持旋转，跳过无效尺寸）
   import colorsys
@@ -123,8 +125,8 @@ def visualize_one_step(states,
       r2, g2, b2 = colorsys.hls_to_rgb(h, l, s)
       return (r2, g2, b2, a)
 
-  for i, (x, y, length, width, yaw, color, is_sdc) in enumerate(
-      zip(masked_x, masked_y, masked_lengths, masked_widths, masked_yaws, colors, masked_is_sdc)):
+  for i, (x, y, length, width, yaw, color, is_sdc, agent_id) in enumerate(
+      zip(masked_x, masked_y, masked_lengths, masked_widths, masked_yaws, colors, masked_is_sdc, masked_agent_ids)):
     if length <= 0 or width <= 0:
       continue
     # 提亮颜色
@@ -153,7 +155,7 @@ def visualize_one_step(states,
     ax.add_patch(rect)
     if is_sdc:
       ax.plot(x, y, 'r*', markersize=15, markeredgecolor='yellow', markeredgewidth=2)
-
+    ax.text(x, y + width/2 + 0.5, str(int(agent_id)), color='black', fontsize=8, ha='center', va='bottom', bbox=dict(facecolor='white', alpha=0.5, edgecolor='none'))
   # Title.
   ax.set_title(title)
   # Set axes.  Should be at least 10m on a side and cover 160% of agents.
@@ -269,7 +271,8 @@ def visualize_all_frames_of_scenario(example_np, idx, size_pixels=1000):
             'lengths': all_length[:, t],
             'widths': all_width[:, t],
             'yaws': all_yaw[:, t],
-            'is_sdc': is_sdc
+            'is_sdc': is_sdc,
+            'agent_id': example_np['agent_id']
         }
 
         # 标题

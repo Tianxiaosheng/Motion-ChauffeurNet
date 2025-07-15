@@ -1,9 +1,19 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import network.model.ogm as ogm
 import numpy as np
+import os, sys
 
+MODEL_PATH = os.path.abspath(os.path.dirname(__file__))
+NETWORK_PATH = os.path.dirname(MODEL_PATH)
+PROJ_PATH = os.path.dirname(NETWORK_PATH)
+DATASET_PATH = os.path.join(PROJ_PATH, 'dataset')
+
+sys.path.append(DATASET_PATH)
+from dataset import Dataset
+
+EVA_PATH =  os.path.join(DATASET_PATH, "data/eva_model_net.pth")
+TARGET_PATH = os.path.join(DATASET_PATH, "data/target_model_net.pth")
 
 # 定义DQN网络结构
 class FMDQNNet(nn.Module):
@@ -88,6 +98,8 @@ class ChauffeurAgent:
         delta_y = 1.0
         self.render = False
 
+        self.dataset = Dataset(observation_dim=observation_dim, file_path=offline_RL_data_path)
+
         # 初始化评估网络和目标网络
         self.evaluate_net = FMDQNNet(input_dim=self.observation_dim,
                                      conv_param={'filter1_size': 6, 'filter2_size': 16,
@@ -115,8 +127,7 @@ class ChauffeurAgent:
         self.tau = 0.001  # 减小软更新系数
 
     def load_replay_memory(self):
-        self.deserialization.get_lon_decision_inputs_by_deserialization()
-        self.fill_replay_memory(self.deserialization.get_lon_decision_inputs())
+        self.dataset.load_replay_memory()
 
     def update_target_net(self):
         self.target_net.load_state_dict(self.evaluate_net.state_dict())
@@ -237,16 +248,6 @@ class ChauffeurAgent:
                                                 obj_bounding_box, dist)
 
         return self.ogm.grid
-
-    def get_action_from_lon_decision_input(self, lon_decision_input):
-        ego_info = self.deserialization.\
-            get_ego_info_from_lon_decision_input(lon_decision_input)
-        if (ego_info.prev_cmd_acc > 0.3):
-            return 2
-        elif (ego_info.prev_cmd_acc < -0.5):
-            return 0
-        else:
-            return 1
 
     def get_action_from_lon_decision_inputs(self, lon_decision_inputs, frame):
         # actions = [-3.0, -1.5, -0.5, 0.0, 0.5, 1.0]
@@ -391,21 +392,6 @@ class ChauffeurAgent:
 
         return reward
 
-    def fill_replay_memory(self, lon_decision_inputs):
-        state = self.get_observation_from_lon_decision_input(lon_decision_inputs[0])
-        for frame in range(1, len(lon_decision_inputs), 1):
-            next_state = self.get_observation_from_lon_decision_input(lon_decision_inputs[frame])
-            action = self.get_action_from_lon_decision_inputs(lon_decision_inputs, frame-1)
-            reward = self.update_reward(lon_decision_inputs[frame-1])
-            done = False
-
-            ego_info = self.deserialization.get_ego_info_from_lon_decision_input(\
-                lon_decision_inputs[frame-1])
-            if ego_info.vel == 0 and ego_info.prev_cmd_acc <= 0:
-                continue
-            self.replay_memory.push(state, action, reward, next_state, done)
-            state = next_state
-
     def normalize_state(self, state):
         ego_dist_to_cli = state[0]
         ego_vel = state[1]
@@ -520,7 +506,7 @@ class ChauffeurAgent:
     def get_q_value_stats(self):
         """获取Q值的统计信息"""
         # 从回放缓冲区采样批数据
-        batch = self.replay_memory.sample(self.batch_size)
+        batch = self.dataset.replay_memory.sample(self.batch_size)
         # batch是一个tuple，包含(state, action, reward, next_state, done)
         states = torch.FloatTensor(batch[0]).to(self.device)  # 获取状态数据
 
@@ -643,12 +629,12 @@ class ChauffeurAgent:
         return self.cql_alpha
 
 def play_qlearning(agent, train=False, record=False):
-    if len(agent.replay_memory) < agent.batch_size:
+    if len(agent.dataset.replay_memory) < agent.batch_size:
         print("repalymemory is not enough, please collect more data")
         return
 
     # 计算训练的轮次
-    period = len(agent.replay_memory) // agent.batch_size
+    period = len(agent.dataset.replay_memory) // agent.batch_size
 
     epoch_stats = {
         'td_errors': [],  # 存储每个batch的TD误差
@@ -666,9 +652,9 @@ def play_qlearning(agent, train=False, record=False):
         if train:
             # start_time = time.time()
             state_batch, action_batch, reward_batch, next_state_batch, done_batch = \
-                agent.replay_memory.sample(agent.batch_size)
+                agent.dataset.replay_memory.sample(agent.batch_size)
 
-            T_data = agent.replay_memory.Transition(state_batch, action_batch,
+            T_data = agent.dataset.replay_memory.Transition(state_batch, action_batch,
                                                   reward_batch, next_state_batch, done_batch)
 
             # 对于CQLAgentlearn方法会返回更多的统计信息
@@ -709,22 +695,27 @@ def play_qlearning(agent, train=False, record=False):
     return stats
 
 def decide_action_of_frame(agent, frame):
-    state = agent.replay_memory.get_frame(frame).state
+    state = agent.dataset.replay_memory.get_frame(frame).state
     action = agent.decide(state)
     return action
 
 def replay_from_memory(agent):
-    totol_action = len(agent.replay_memory)
+    totol_action = len(agent.dataset.replay_memory)
     accuracy_action = 0
-    for frame in range(len(agent.replay_memory)):
+    print("memroy_size:{}".format(len(agent.dataset.replay_memory)))
+    for frame in range(len(agent.dataset.replay_memory)):
         action = decide_action_of_frame(agent, frame)
-        #print("frame: {}, action: {}, agent->action: {}".format(frame, agent.replay_memory.get_frame(frame).action, action))
-        if action == agent.replay_memory.get_frame(frame).action:
+        record_action = agent.dataset.replay_memory.get_frame(frame).action
+        if (frame % 100 == 0):
+            print("frame: {}, action: {}, agent->action: {}".\
+                  format(frame, record_action, action))
+        if action == record_action:
             accuracy_action += 1
     print("accuracy_action: {} / {} = {}".format(accuracy_action, totol_action, accuracy_action / totol_action))
     return accuracy_action / totol_action
 
-class CQLAgent(DQNAgent):
+
+class CQLAgent(ChauffeurAgent):
     def __init__(self, net_kwargs={}, gamma=0.9, epsilon=0.05,
                  batch_size=64, observation_dim=(4, 67, 133), action_size=6,
                  offline_RL_data_path=None, cql_alpha=0.01):

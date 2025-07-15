@@ -90,7 +90,7 @@ class OccupancyGrid:
         self.heading = ego_heading % (2.0 * math.pi)
 
         # self.grid = np.zeros(self.shape_dim, dtype=float)
-        self.grid = np.full(self.shape_dim, 0.0, dtype=float)
+        self.grid = np.full(self.shape_dim, -1.0, dtype=np.float16)
 
         if self.render:
             print("ego_x:{}, y:{}, th:{}, grid_global_x:{}, y:{}, th:{}".\
@@ -105,7 +105,7 @@ class OccupancyGrid:
             #print("pt->x:{}, y{}".format(point_xyv[0], point_xyv[1]))
             if local_x < 0 or local_x > self.max_x or local_y < 0 or local_y > self.max_y:
                 continue
-            print("in range local_pt_x:{}, y{}".format(local_x, local_y))
+            #print("in range local_pt_x:{}, y{}".format(local_x, local_y))
             y = self.cvt_y_to_index_y(local_y)
             x = self.cvt_x_to_index_x(local_x)
 
@@ -117,7 +117,7 @@ class OccupancyGrid:
             local_x , local_y, local_heading = \
                     cvt_pose_global_to_local(point_xyt[0], point_xyt[1], 0.0,\
                                              self.center_x, self.center_y, self.heading)
-            print("stop_pt->x:{}, y:{}, local_x:{}, y:{}".format(point_xyt[0], point_xyt[1], local_x, local_y))
+            #print("stop_pt->x:{}, y:{}, local_x:{}, y:{}".format(point_xyt[0], point_xyt[1], local_x, local_y))
             if local_x < 0 or local_x > self.max_x or local_y < 0 or local_y > self.max_y:
                 continue
             y = self.cvt_y_to_index_y(local_y)
