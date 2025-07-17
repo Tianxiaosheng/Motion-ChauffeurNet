@@ -36,8 +36,11 @@ def plot_training_curves(stats, save_path='training_curves.png'):
     plt.close()
 
 def main(num_epochs_training, train=False):
-    # DQN parameters
+    # data for training
     file_path = '/home/uisee/Downloads/uncompressed_scenario_training_20s_training_20s.tfrecord-00006-of-01000'
+    # data for testing
+    #file_path = '/home/uisee/Downloads/uncompressed_scenario_training_20s_training_20s.tfrecord-00012-of-01000'
+    # DQN parameters
     net_kwargs = {'hidden_sizes' : [64, 64], 'learning_rate' : 0.0005}
     gamma=0.9
     epsilon=0.00
@@ -79,17 +82,17 @@ def main(num_epochs_training, train=False):
                 print(f"Action Match Rate: {action_match_rate:.4f}")
                 print(f"Q Values -> Mean: {q_stats['mean']:.4f}, Max: {q_stats['max']:.4f}")
             # save nn model
-            if (epoch_stats['td_error'] < min_td_error):
-                min_td_error = epoch_stats['td_error']
-                agent.save_model_params()
+            # if (epoch_stats['td_error'] < min_td_error):
+            #     min_td_error = epoch_stats['td_error']
+            #     agent.save_model_params()
         agent.save_model_params()
         # 训练结束后绘制学习曲线
         plot_training_curves(training_stats, save_path=f'training_curves_{time.strftime("%Y%m%d_%H%M%S")}.png')
-    elif False:
+    else:
         agent.load_model_params()
 
-    # print("replay_memory accuracy After training:")
-    # replay_from_memory(agent)
+    print("replay_memory accuracy After training:")
+    replay_from_memory(agent)
 
 if __name__ == "__main__":
-    main(num_epochs_training=200, train=True)
+    main(num_epochs_training=11, train=False)

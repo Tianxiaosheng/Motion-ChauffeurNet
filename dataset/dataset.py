@@ -82,9 +82,15 @@ class Dataset:
             print("curr_scenario_id:{}".format(idx))
             self.fill_replay_memory(self.scenarios.get_scenario(idx))
 
+    def get_scenario_frame_size(self, scenario):
+        sdc_track_index = scenario.sdc_track_index
+        num_frames = len(scenario.tracks[sdc_track_index].states)
+        num_frames = min(num_frames, len(scenario.dynamic_map_states))
+        return num_frames
+
     def fill_replay_memory(self, scenario):
         state = self.get_observation_from_scenario(scenario, 0)
-        for frame in range(1, len(scenario.timestamps_seconds), 1):
+        for frame in range(1, self.get_scenario_frame_size(scenario), 1):
             next_state = self.get_observation_from_scenario(scenario, frame)
             action = self.get_action_from_scenario(scenario, frame)
             reward = self.get_reward_from_scenario(scenario, frame)
@@ -243,7 +249,10 @@ class Dataset:
         times = []
         speeds = []
         curr_time = timestamps_seconds[frame]
+
         for i, state in enumerate(scenario.tracks[sdc_track_index].states[frame:]):
+            if frame+i >= len(scenario.timestamps_seconds):
+                break
             if (timestamps_seconds[frame+i] - curr_time) < delay_time:
                 continue
             if (timestamps_seconds[frame+i] - curr_time - delay_time > observe_window):
@@ -320,6 +329,8 @@ class Dataset:
 
     def update_ogm_by_traffic_light(self, scenario, frame):
         map_point_xyt = []
+        if frame >= len(scenario.dynamic_map_states):
+            return
         for traffic_signal_lane_state in scenario.dynamic_map_states[frame].lane_states:
             lane_state = traffic_signal_lane_state.state
             stop_point = traffic_signal_lane_state.stop_point
@@ -343,6 +354,8 @@ class Dataset:
         accumulate_dist = 0.0
         tmp_xy = []
         for i, ego_state in enumerate(ego_track.states[frame:]):
+            if not ego_state.valid:
+                break
             if i > 0:
                 accumulate_dist += self.calc_dist(tmp_xy, \
                         [ego_state.center_x, ego_state.center_y])
@@ -378,19 +391,27 @@ class Dataset:
 
     def get_obj_vel_from_obj_info(self, track, frame):
         obj_state = self.get_obj_state_from_obj_info(track, frame)
+        if not obj_state.valid:
+            return 0.0
         #print("heading:{}, velocity_x:{}, velocity_y:{}".format(obj_state.heading, obj_state.velocity_x, obj_state.velocity_y))
         return math.hypot(obj_state.velocity_x, obj_state.velocity_y)
 
     def get_obj_width_from_obj_info(self, track, frame):
         obj_state = self.get_obj_state_from_obj_info(track, frame)
+        if not obj_state.valid:
+            return 0.0
         return obj_state.width
 
     def get_obj_length_from_obj_info(self, track, frame):
         obj_state = self.get_obj_state_from_obj_info(track, frame)
+        if not obj_state.valid:
+            return 0.0
         return obj_state.length
 
     def get_obj_heading_from_obj_info(self, track, frame):
         obj_state = self.get_obj_state_from_obj_info(track, frame)
+        if not obj_state.valid:
+            return 0.0
         return (obj_state.heading % (math.pi * 2.0))
 
 
