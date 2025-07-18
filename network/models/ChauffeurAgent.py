@@ -101,14 +101,14 @@ class ChauffeurAgent:
         self.dataset = Dataset(observation_dim=observation_dim, file_path=offline_RL_data_path)
 
         # 初始化评估网络和目标网络
-        self.evaluate_net = FMDQNNet(input_dim=self.observation_dim,
+        self.evaluate_net = nn.DataParallel(FMDQNNet(input_dim=self.observation_dim,
                                      conv_param={'filter1_size': 6, 'filter2_size': 16,
                                                           'filter_width': 5, 'pad': 0, 'stride': 1},
-                                     hidden1_size= 120, hidden2_size=84, output_size=self.action_n).to(self.device)
-        self.target_net = FMDQNNet(input_dim=self.observation_dim,
+                                     hidden1_size= 120, hidden2_size=84, output_size=self.action_n)).to(self.device)
+        self.target_net = nn.DataParallel(FMDQNNet(input_dim=self.observation_dim,
                                      conv_param={'filter1_size': 6, 'filter2_size': 16,
                                                           'filter_width': 5, 'pad': 0, 'stride': 1},
-                                     hidden1_size= 120, hidden2_size=84, output_size=self.action_n).to(self.device)
+                                     hidden1_size= 120, hidden2_size=84, output_size=self.action_n)).to(self.device)
 
         # 初始化目标网络的权重与评估网络相同
         self.update_target_net()
@@ -125,6 +125,8 @@ class ChauffeurAgent:
 
         self.target_update_freq = 500  # 增加更新间隔
         self.tau = 0.001  # 减小软更新系数
+
+        print("device is {}".format(self.device))
 
     def load_replay_memory(self):
         self.dataset.load_replay_memory()
@@ -487,21 +489,19 @@ class ChauffeurAgent:
         plt.show()
 
     def save_model_params(self):
-        torch.save(self.evaluate_net.state_dict(), EVA_PATH)
-        torch.save(self.target_net.state_dict(), TARGET_PATH)
-        # # 使用旧版本的序列化格式保存模型
-        # torch.save(self.evaluate_net.state_dict(),
-        #           EVA_PATH,
-        #           _use_new_zipfile_serialization=False)
-        # torch.save(self.target_net.state_dict(),
-        #           TARGET_PATH,
-        #           _use_new_zipfile_serialization=False)
+        # 兼容单卡和多卡
+        eval_net = self.evaluate_net.module if hasattr(self.evaluate_net, "module") else self.evaluate_net
+        target_net = self.target_net.module if hasattr(self.target_net, "module") else self.target_net
+        torch.save(eval_net.state_dict(), EVA_PATH)
+        torch.save(target_net.state_dict(), TARGET_PATH)
 
     def load_model_params(self):
-        self.evaluate_net.load_state_dict(torch.load(EVA_PATH))
-        self.evaluate_net.eval()
-        self.target_net.load_state_dict(torch.load(TARGET_PATH))
-        self.target_net.eval()
+        eval_net = self.evaluate_net.module if hasattr(self.evaluate_net, "module") else self.evaluate_net
+        target_net = self.target_net.module if hasattr(self.target_net, "module") else self.target_net
+        eval_net.load_state_dict(torch.load(EVA_PATH, map_location=self.device))
+        eval_net.eval()
+        target_net.load_state_dict(torch.load(TARGET_PATH, map_location=self.device))
+        target_net.eval()
 
     def get_q_value_stats(self):
         """获取Q值的统计信息"""

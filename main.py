@@ -87,7 +87,7 @@ def main(num_epochs_training, train=False):
             #     agent.save_model_params()
         agent.save_model_params()
         # 训练结束后绘制学习曲线
-        plot_training_curves(training_stats, save_path=f'training_curves_{time.strftime("%Y%m%d_%H%M%S")}.png')
+        #plot_training_curves(training_stats, save_path=f'training_curves_{time.strftime("%Y%m%d_%H%M%S")}.png')
     else:
         agent.load_model_params()
 
@@ -95,4 +95,4 @@ def main(num_epochs_training, train=False):
     replay_from_memory(agent)
 
 if __name__ == "__main__":
-    main(num_epochs_training=11, train=False)
+    main(num_epochs_training=11, train=True)
