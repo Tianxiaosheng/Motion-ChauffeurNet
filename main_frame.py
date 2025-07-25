@@ -1,0 +1,123 @@
+import os
+import sys
+import time
+from dataset.frame_dataset import Frame_Dataset
+import numpy as np
+from pathlib import Path
+import matplotlib.pyplot as plt
+from network.models.ChauffeurAgent_frame import CQLAgent, play_qlearning, replay_from_memory
+
+def plot_training_curves(stats, save_path='training_curves.png'):
+    """绘制训练过程的各项指标"""
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
+
+    # TD误差曲线
+    ax1.plot(stats['td_errors'])
+    ax1.set_title('TD Error over Training')
+    ax1.set_xlabel('Epochs (x10)')
+    ax1.set_ylabel('TD Error')
+
+    # Q值变化曲线
+    q_means = [q['mean'] for q in stats['q_values']]
+    q_maxs = [q['max'] for q in stats['q_values']]
+    ax2.plot(q_means, label='Mean Q')
+    ax2.plot(q_maxs, label='Max Q')
+    ax2.set_title('Q Values over Training')
+    ax2.set_xlabel('Epochs (x10)')
+    ax2.set_ylabel('Q Value')
+    ax2.legend()
+
+    # 动作匹配率曲线
+    ax3.plot(stats['action_match_rates'])
+    ax3.set_title('Action Match Rate over Training')
+    ax3.set_xlabel('Epochs (x10)')
+    ax3.set_ylabel('Match Rate')
+
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+def iter_tf_files(folder_path, pattern=".tfrecord"):
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            if pattern in file:
+                yield os.path.join(root, file)
+
+def main(num_epochs_training, train=False, view_time=False):
+    # data for training
+    training_tf_folder_path = 'dataset/data/training_min_20s'
+    testing_tf_folder_path = 'dataset/data/testing_min_20s'
+
+    time_0 = time.time()
+    # DQN parameters
+    net_kwargs = {'hidden_sizes' : [64, 64], 'learning_rate' : 0.0005}
+    gamma=0.9
+    epsilon=0.00
+    batch_size=1000
+    agent = CQLAgent(net_kwargs, gamma, epsilon, batch_size,\
+                     observation_dim=(8, 100, 200), action_size=6,
+                     offline_RL_data_path=training_tf_folder_path, cql_alpha=1.0)
+
+    time_1 = time.time()
+    if view_time:
+        print("Agent init time:{}".format(time_1-time_0))
+
+    print("replay_memory accuracy Before training:")
+    replay_from_memory(agent, testing_tf_folder_path, 400)
+    time_2 = time.time()
+    if view_time:
+        print("Replay_memory time before training:{}".format(time_2-time_1))
+
+    min_td_error = float('inf')
+    if train:
+        training_stats = {
+            'td_errors': [],
+            'q_values': [],
+            'action_match_rates': []
+        }
+        file_path_list = list(iter_tf_files(training_tf_folder_path))
+        for epoch in range(num_epochs_training):
+
+            time_3 = time.time()
+            for tf_file_idx, tf_file_path in enumerate(file_path_list):
+                dataset = Frame_Dataset(observation_dim=(8, 100, 200), tf_file_path = tf_file_path)
+
+                epoch_stats = play_qlearning(agent, dataset, epoch % 5 == 0 and tf_file_idx == 0)
+                agent.adjust_cql_alpha(epoch_stats['q_values'])
+                time_4 = time.time()
+                print("epoch {} file {}'s training time: {}".format(epoch, tf_file_idx, time_4 - time_3))
+
+                if tf_file_idx % 5 == 0:
+                    # 计算Q值统计
+                    q_stats = agent.get_q_value_stats(dataset)
+                    # 计算动作匹配率
+                    action_match_rate = replay_from_memory(agent, testing_tf_folder_path, 400)
+
+                    training_stats['td_errors'].append(epoch_stats['td_error'])
+                    training_stats['q_values'].append(q_stats)
+                    training_stats['action_match_rates'].append(action_match_rate)
+
+                    print(f"Epoch {epoch}, File_index {tf_file_idx}")
+                    print(f"TD Error: {epoch_stats['td_error']:.4f}")
+                    print(f"Action Match Rate: {action_match_rate:.4f}")
+                    print(f"Q Values -> Mean: {q_stats['mean']:.4f}, Max: {q_stats['max']:.4f}")
+                time_3 = time.time()
+            time_5 = time.time()
+            print("epoch {} training time: {}".format(epoch, time_5 - time_3))
+            # save nn model
+            # if (epoch_stats['td_error'] < min_td_error):
+            #     min_td_error = epoch_stats['td_error']
+            #     agent.save_model_params()
+        agent.save_model_params()
+        # 训练结束后绘制学习曲线
+        #plot_training_curves(training_stats, save_path=f'training_curves_{time.strftime("%Y%m%d_%H%M%S")}.png')
+    else:
+        agent.load_model_params()
+    time_6 = time.time()
+    
+    print("Whole training time:{}".format(time_6-time_2))
+    print("replay_memory accuracy After training:")
+    replay_from_memory(agent, testing_tf_folder_path, 400)
+
+if __name__ == "__main__":
+    main(num_epochs_training=4, train=True, view_time=True)

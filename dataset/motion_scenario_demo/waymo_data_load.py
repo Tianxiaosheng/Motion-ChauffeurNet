@@ -261,6 +261,11 @@ class WaymoScenarioDataset(Dataset):
         data = self._parse_example(idx)
         return {k: v.numpy() if torch.is_tensor(v) else v for k, v in data.items()}
 
+    def get_scenario_frame_size(self, scenario):
+        sdc_track_index = scenario.sdc_track_index
+        num_frames = len(scenario.tracks[sdc_track_index].states)
+        num_frames = min(num_frames, len(scenario.dynamic_map_states))
+        return num_frames
 
 # FILENAME = '/home/uisee/Downloads/uncompressed_scenario_training_20s_training_20s.tfrecord-00006-of-01000'
 # handle_one_tfrecord_file(FILENAME)

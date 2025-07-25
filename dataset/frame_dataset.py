@@ -1,18 +1,18 @@
-
-
 from collections import deque, namedtuple       # 队列类型
 import math
 import random
-from motion_scenario_demo.waymo_data_load import WaymoScenarioDataset
-from ogm import OccupancyGrid
 import numpy as np
 from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 
 import os
 import sys
 SCRIPT_PATH = os.path.abspath(os.path.dirname(__file__))
 sys.path.append(SCRIPT_PATH)
 sys.path.append(os.path.join(SCRIPT_PATH, 'motion_scenario_demo/py_protos'))
+
+from ogm import OccupancyGrid
+from motion_scenario_demo.waymo_data_load import WaymoScenarioDataset
 
 from waymo_open_dataset.protos.scenario_pb2 import Scenario
 from waymo_open_dataset.protos.scenario_pb2 import Track
@@ -26,84 +26,60 @@ def normalize_pos(x):
     return (1 - math.exp(-math.pow(x / 2, 3))) /\
             (1 + math.exp(-math.pow(x / 2, 3)))
 
-class DQNReplayer:
-    def __init__(self, capacity):
-        self.memory = deque([], maxlen=capacity)
-        self.Transition = namedtuple('Transition', ('state', 'action', 'reward', 'next_state', 'done'))
-    def sample(self, batch_size):
-        batch_data = random.sample(self.memory, batch_size)
-        state, action, reward, next_state, done = zip(*batch_data)
-        return state, action, reward, next_state, done
-
-    def push(self, *args):
-        # *args: 把传进来的所有参数都打包起来生成元组形式
-        # self.push(1, 2, 3, 4, 5)
-        # args = (1, 2, 3, 4, 5)
-        self.memory.append(self.Transition(*args))
-
-    def get(self, frame):
-        if frame < len(self.memory):
-            return self.memory[frame]
-        else:
-            return -1
-
-    def __len__(self):
-        return len(self.memory)
-
-    def print_frame(self, frame_index):
-        if frame_index < 0 or frame_index >= len(self.memory):
-            print("帧索引超出范围。")
-        else:
-            transition = list(self.memory)[frame_index]
-            print(f"帧 {frame_index}:=========================")
-            print(f"动作: {transition.action}")
-            print(f"奖励: {transition.reward}")
-            print(f"完成: {transition.done}")
-
-    def get_frame(self, frame_index):
-        if frame_index < 0 or frame_index >= len(self.memory):
-            print("帧索引超出范围。")
-        else:
-            return list(self.memory)[frame_index]
-
-class Dataset:
-    def __init__(self, observation_dim=(6, 300, 600), file_path=None):
+class Frame_Dataset(Dataset):
+    def __init__(self, observation_dim=(8, 100, 200), tf_file_path=None):
         delta_x = 0.6
         delta_y = 0.6
         self.render = False
-        self.file_path = file_path
-        self.replay_memory = DQNReplayer(capacity=40000)
+        self.tf_file_path = tf_file_path
         self.ogm = OccupancyGrid(observation_dim, delta_x=delta_x, delta_y=delta_y,
                                  render=self.render)
+        self.frame_len = 0
+        self.frame_index_list = []
 
-    def load_replay_memory(self):
-        # every scenario has 200 records
-        self.scenarios = WaymoScenarioDataset(self.file_path)
-        for idx in range(min(len(self.scenarios), 15)):
-            print("curr_scenario_id:{}".format(idx))
-            self.fill_replay_memory(self.scenarios.get_scenario(idx))
+        # 新增：场景缓存
+        self._scenario_cache = {}
+        self._max_cache_size = 100  # 可根据内存调整
 
-    def get_scenario_frame_size(self, scenario):
-        sdc_track_index = scenario.sdc_track_index
-        num_frames = len(scenario.tracks[sdc_track_index].states)
-        num_frames = min(num_frames, len(scenario.dynamic_map_states))
-        return num_frames
+        self.scenarios = WaymoScenarioDataset(self.tf_file_path)
+        self.calc_frame_len()
 
-    def fill_replay_memory(self, scenario):
-        state = self.get_observation_from_scenario(scenario, 0)
-        for frame in range(1, self.get_scenario_frame_size(scenario), 1):
-            next_state = self.get_observation_from_scenario(scenario, frame)
-            action = self.get_action_from_scenario(scenario, frame)
-            reward = self.get_reward_from_scenario(scenario, frame)
-            done = False
+    def __len__(self):
+        return self.frame_len
 
-            self.replay_memory.push(state, action, reward, next_state, done)
-            state = next_state
+    def __getitem__(self, idx):
+        scenario_idx, frame_idx = self.frame_index_list[idx]
+        #print("frame_idx:{}, scenario_idx:{}, frame_idx:{}".format(idx, scenario_idx, frame_idx))
+        scenario = self._get_scenario_with_cache(scenario_idx)
 
-    def dump_observateion(self, frame):
-        scenario = self.scenarios.get_scenario(1)
-        state = self.get_observation_from_scenario(scenario, frame)
-        self.ogm.dump_ogm_graphs(state)
+        state = self.get_observation_from_scenario(scenario, frame_idx).astype(np.float32)
+        next_state = self.get_observation_from_scenario(scenario, frame_idx+1).astype(np.float32)
+
+        action = np.expand_dims(self.get_action_from_scenario(scenario, frame_idx), axis=-1)
+        reward = np.expand_dims(self.get_reward_from_scenario(scenario, frame_idx), axis=-1).astype(np.float32)
+        done = np.expand_dims(False, axis=-1).astype(np.float32)
+
+        return state, action, reward, next_state, done
+
+    def _get_scenario_with_cache(self, scenario_idx):
+        # 优先从缓存取
+        if scenario_idx in self._scenario_cache:
+            return self._scenario_cache[scenario_idx]
+        # 没有则解析并加入缓存
+        scenario = self.scenarios.get_scenario(scenario_idx)
+        if len(self._scenario_cache) >= self._max_cache_size:
+            # 简单FIFO策略，弹出最早加入的
+            self._scenario_cache.pop(next(iter(self._scenario_cache)))
+        self._scenario_cache[scenario_idx] = scenario
+        return scenario
+
+    def calc_frame_len(self):
+        for scenario_idx in range(min(len(self.scenarios), 500)):
+            scenario = self._get_scenario_with_cache(scenario_idx)
+            num_frames = self.scenarios.get_scenario_frame_size(scenario)-1
+            for frame_idx in range(num_frames):
+                self.frame_index_list.append((scenario_idx, frame_idx))
+        self.frame_len = len(self.frame_index_list)
 
     def calc_risk_value_from_scenario(self, scenario, frame, render=False):
         sdc_track_index = scenario.sdc_track_index
@@ -415,11 +391,19 @@ class Dataset:
             return 0.0
         return (obj_state.heading % (math.pi * 2.0))
 
+    def dump_observateion(self, frame):
+        print("frame_nums:{}".format(self.frame_len))
+        if self.frame_len > frame:
+            item = self.__getitem__(0)
+            self.ogm.dump_ogm_graphs(item[0])
 
-# FILENAME = '/home/uisee/Downloads/uncompressed_scenario_training_20s_training_20s.tfrecord-00006-of-01000'
-# dataset = Dataset(observation_dim=(8, 100, 200), file_path=FILENAME)
-# dataset.load_replay_memory()
-
-#dataset.dump_observateion(101)
-#dataset.get_action_from_scenario(101)
-#dataset.get_reward_from_scenario(101, True)
+# FILENAME = 'data/training_20s'
+# file_path_list = list(iter_tf_files(FILENAME))
+# print("file_list_size:{}".format(len(file_path_list)))
+# if len(file_path_list) > 0:
+#     dataset = Frame_Dataset(observation_dim=(8, 100, 200), tf_file_path = file_path_list[0])
+#     train_dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
+#     states, actions, rewards, next_states, dones = next(iter(train_dataloader))
+#     print(type(states))
+#     print("states_size:{}, actions_size:{}, rewards_size:{}, next_reward:{}, Dones_size:{}".\
+#           format(states.size(), actions.size(), rewards.size(), next_states.size(), dones.size()))

@@ -90,7 +90,7 @@ class OccupancyGrid:
         self.heading = ego_heading % (2.0 * math.pi)
 
         # self.grid = np.zeros(self.shape_dim, dtype=float)
-        self.grid = np.full(self.shape_dim, -1.0, dtype=np.float16)
+        self.grid = np.full(self.shape_dim, -1.0, dtype=np.float32)
 
         if self.render:
             print("ego_x:{}, y:{}, th:{}, grid_global_x:{}, y:{}, th:{}".\

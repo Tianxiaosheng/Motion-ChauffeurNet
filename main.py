@@ -37,7 +37,7 @@ def plot_training_curves(stats, save_path='training_curves.png'):
 
 def main(num_epochs_training, train=False):
     # data for training
-    file_path = '/home/uisee/Downloads/uncompressed_scenario_training_20s_training_20s.tfrecord-00006-of-01000'
+    file_path = 'dataset/data/uncompressed_scenario_training_20s_training_20s.tfrecord-00006-of-01000'
     # data for testing
     #file_path = '/home/uisee/Downloads/uncompressed_scenario_training_20s_training_20s.tfrecord-00012-of-01000'
     # DQN parameters
@@ -48,10 +48,11 @@ def main(num_epochs_training, train=False):
     agent = CQLAgent(net_kwargs, gamma, epsilon, batch_size,\
                      observation_dim=(8, 100, 200), action_size=6,
                      offline_RL_data_path=file_path, cql_alpha=1.0)
-
+    start_time = time.time()
     agent.load_replay_memory()
-
+    print("load replay_memory time:{}".format(time.time() - start_time))
     print("replay_memory accuracy Before training:")
+    start_time = time.time()
     replay_from_memory(agent)
     min_td_error = float('inf')
     if train:

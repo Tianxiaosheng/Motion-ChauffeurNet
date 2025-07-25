@@ -3,6 +3,10 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import os, sys
+from torch.utils.data import DataLoader
+from dataset.frame_dataset import Frame_Dataset
+import math
+import time
 
 MODEL_PATH = os.path.abspath(os.path.dirname(__file__))
 NETWORK_PATH = os.path.dirname(MODEL_PATH)
@@ -10,10 +14,15 @@ PROJ_PATH = os.path.dirname(NETWORK_PATH)
 DATASET_PATH = os.path.join(PROJ_PATH, 'dataset')
 
 sys.path.append(DATASET_PATH)
-from dataset import Dataset
 
 EVA_PATH =  os.path.join(DATASET_PATH, "data/eva_model_net.pth")
 TARGET_PATH = os.path.join(DATASET_PATH, "data/target_model_net.pth")
+
+def iter_tf_files(folder_path, pattern=".tfrecord"):
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            if pattern in file:
+                yield os.path.join(root, file)
 
 # 定义DQN网络结构
 class FMDQNNet(nn.Module):
@@ -98,8 +107,6 @@ class ChauffeurAgent:
         delta_y = 1.0
         self.render = False
 
-        self.dataset = Dataset(observation_dim=observation_dim, file_path=offline_RL_data_path)
-
         # 初始化评估网络和目标网络
         self.evaluate_net = nn.DataParallel(FMDQNNet(input_dim=self.observation_dim,
                                      conv_param={'filter1_size': 6, 'filter2_size': 16,
@@ -128,8 +135,8 @@ class ChauffeurAgent:
 
         print("device is {}".format(self.device))
 
-    def load_replay_memory(self):
-        self.dataset.load_replay_memory()
+    # def load_replay_memory(self):
+    #     self.dataset.load_replay_memory()
 
     def update_target_net(self):
         self.target_net.load_state_dict(self.evaluate_net.state_dict())
@@ -173,28 +180,20 @@ class ChauffeurAgent:
         if self.count % self.target_update_freq == 0:
             self.soft_update(self.tau)
 
-    def decide(self, observation):
+    def decide(self, state):
+        # state: [B, C, H, W] 或 [C, H, W]
+        if isinstance(state, torch.Tensor) and state.dim() == 3:
+            # 单样本，自动加batch维
+            state = state.unsqueeze(0)
+
         # epsilon贪心策略
         if np.random.rand() < self.epsilon:
-            return np.random.randint(self.action_n)
-
-        # 确保observation是numpy数组
-        if not isinstance(observation, np.ndarray):
-            observation = np.array(observation)
-
-        # 添加batch维度和channel维度(如果需要)
-        if observation.ndim == 3:  # 如果已经是[C,H,W]格式
-            observation = observation[np.newaxis, ...]  # 变成[1,C,H,W]
-        elif observation.ndim == 2:  # 如果是[H,W]格式
-            observation = observation[np.newaxis, np.newaxis, ...]  # 变成[1,1,H,W]
-
-        # 转换为tensor
-        state = torch.from_numpy(observation).float().to(self.device)
+            return np.random.randint(self.action_n, size=(state.shape[0],))
 
         # 获取动作
         with torch.no_grad():
             q_values = self.evaluate_net(state)
-            action = torch.argmax(q_values).item()
+            action = torch.argmax(q_values, dim=1)
 
         return action
 
@@ -503,12 +502,11 @@ class ChauffeurAgent:
         target_net.load_state_dict(torch.load(TARGET_PATH, map_location=self.device))
         target_net.eval()
 
-    def get_q_value_stats(self):
+    def get_q_value_stats(self, dataset):
         """获取Q值的统计信息"""
         # 从回放缓冲区采样批数据
-        batch = self.dataset.replay_memory.sample(self.batch_size)
-        # batch是一个tuple，包含(state, action, reward, next_state, done)
-        states = torch.FloatTensor(batch[0]).to(self.device)  # 获取状态数据
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=16, pin_memory=True)
+        states, actions, rewards, next_states, dones = next(iter(dataloader))
 
         # 计算Q值
         with torch.no_grad():
@@ -628,13 +626,13 @@ class ChauffeurAgent:
 
         return self.cql_alpha
 
-def play_qlearning(agent, train=False, record=False):
-    if len(agent.dataset.replay_memory) < agent.batch_size:
+def play_qlearning(agent, dataset, record=False):
+    if len(dataset) < agent.batch_size:
         print("repalymemory is not enough, please collect more data")
         return
 
     # 计算训练的轮次
-    period = len(agent.dataset.replay_memory) // agent.batch_size
+    period = 0
 
     epoch_stats = {
         'td_errors': [],  # 存储每个batch的TD误差
@@ -648,36 +646,25 @@ def play_qlearning(agent, train=False, record=False):
         }
     }
 
-    for _ in range(period):
-        if train:
-            # start_time = time.time()
-            state_batch, action_batch, reward_batch, next_state_batch, done_batch = \
-                agent.dataset.replay_memory.sample(agent.batch_size)
+    train_dataloader = DataLoader(dataset, batch_size=agent.batch_size, shuffle=True, num_workers=8, pin_memory=True)
+    for batch_idx, (states, actions, rewards, next_states, dones) in enumerate(train_dataloader):
+        batch_stats = agent.learn(states, actions, rewards, next_states, dones)
 
-            T_data = agent.dataset.replay_memory.Transition(state_batch, action_batch,
-                                                  reward_batch, next_state_batch, done_batch)
+        if record:
+            # 记录统计信息
+            period += 1
+            if isinstance(batch_stats, dict):
+                epoch_stats['td_errors'].append(batch_stats.get('td_loss', 0))
+                epoch_stats['cql_losses'].append(batch_stats.get('cql_loss', 0))
+                epoch_stats['total_losses'].append(batch_stats.get('total_loss', 0))
 
-            # 对于CQLAgentlearn方法会返回更多的统计信息
-            batch_stats = agent.learn(T_data)
-
-            if record:
-                # 记录统计信息
-                if isinstance(batch_stats, dict):
-                    epoch_stats['td_errors'].append(batch_stats.get('td_loss', 0))
-                    epoch_stats['cql_losses'].append(batch_stats.get('cql_loss', 0))
-                    epoch_stats['total_losses'].append(batch_stats.get('total_loss', 0))
-
-                    # 更新Q值统计信息
-                    if 'q_values' in batch_stats:
-                        q_stats = batch_stats['q_values']
-                        epoch_stats['q_values']['mean'].append(q_stats['mean'])
-                        epoch_stats['q_values']['max'].append(q_stats['max'])
-                        epoch_stats['q_values']['min'].append(q_stats['min'])
-                        epoch_stats['q_values']['std'].append(q_stats['std'])
-
-                # end_time = time.time()
-                # print("period {} train time: {}".format(_, end_time - start_time))
-
+                # 更新Q值统计信息
+                if 'q_values' in batch_stats:
+                    q_stats = batch_stats['q_values']
+                    epoch_stats['q_values']['mean'].append(q_stats['mean'])
+                    epoch_stats['q_values']['max'].append(q_stats['max'])
+                    epoch_stats['q_values']['min'].append(q_stats['min'])
+                    epoch_stats['q_values']['std'].append(q_stats['std'])
     # 计算整个epoch的平均统计信息
     stats = {
         'td_error': np.mean(epoch_stats['td_errors']) if epoch_stats['td_errors'] else 0,
@@ -694,26 +681,68 @@ def play_qlearning(agent, train=False, record=False):
 
     return stats
 
-def decide_action_of_frame(agent, frame):
-    state = agent.dataset.replay_memory.get_frame(frame).state
-    action = agent.decide(state)
-    return action
-
-def replay_from_memory(agent):
-    totol_action = len(agent.dataset.replay_memory)
+def replay_from_memory(agent, testing_tf_folder_path, batch_size=64, view_time=False):
+    total_action = 0
     accuracy_action = 0
-    print("memroy_size:{}".format(len(agent.dataset.replay_memory)))
-    for frame in range(len(agent.dataset.replay_memory)):
-        action = decide_action_of_frame(agent, frame)
-        record_action = agent.dataset.replay_memory.get_frame(frame).action
-        if (frame % 100 == 0):
-            print("frame: {}, action: {}, agent->action: {}".\
-                  format(frame, record_action, action))
-        if action == record_action:
-            accuracy_action += 1
-    print("accuracy_action: {} / {} = {}".format(accuracy_action, totol_action, accuracy_action / totol_action))
-    return accuracy_action / totol_action
-
+    time_0 = time.time()
+    file_path_list = list(iter_tf_files(testing_tf_folder_path))
+    print("testing_file_size{}".format(len(file_path_list)))
+    for file_path in file_path_list:
+        time_1 = time.time()
+        dataset = Frame_Dataset(observation_dim=(8, 100, 200), tf_file_path=file_path)
+        num_samples = len(dataset)
+        if num_samples == 0:
+            continue
+        total_action += num_samples
+        print("memory_size (current file): {}".format(num_samples))
+        time_2 = time.time()
+        print("dataset init time:{}".format(time_2-time_1))
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
+        time_3 = time.time()
+        print("dataloader_init_time:{}".format(time_3-time_2))
+        for batch_idx, (states, actions, rewards, next_states, dones) in enumerate(dataloader):
+            # states: [batch, ...], actions: [batch, 1] or [batch]
+            # agent.decide应支持batch输入
+            time_4 = time.time()
+            if view_time:
+                print("curr batch_idx:{}, loading time:{}".format(batch_idx, time_4 - time_3))
+            with torch.no_grad():
+                # 如果states是numpy，转为tensor
+                if isinstance(states, np.ndarray):
+                    states = torch.from_numpy(states).float().to(agent.device)
+                elif isinstance(states, torch.Tensor):
+                    states = states.float().to(agent.device)
+                # actions shape: [batch, 1] or [batch]
+                if isinstance(actions, torch.Tensor):
+                    actions = actions.cpu().numpy()
+                if actions.ndim > 1:
+                    actions = actions.squeeze(-1)
+                # agent.decide支持batch输入
+                pred_actions = agent.decide(states)
+                # pred_actions shape: [batch] or [batch, 1]
+                if isinstance(pred_actions, torch.Tensor):
+                    pred_actions = pred_actions.cpu().numpy()
+                if isinstance(pred_actions, np.ndarray) and pred_actions.ndim > 1:
+                    pred_actions = pred_actions.squeeze(-1)
+                # 统计本batch准确个数
+                match = (pred_actions == actions).sum()
+                accuracy_action += match
+                if batch_idx % 10 == 0 and view_time:
+                    print("batch: {}, match: {}, batch_size: {}".format(batch_idx, match, len(actions)))
+                    all_action = np.stack([actions, pred_actions], axis=-1)
+                    print("compare_actions:{}".format(all_action))
+                time_3 = time.time()
+                if view_time:
+                    print("pred time:{}".format(time_3-time_4))
+        time_5 = time.time()
+        if view_time:
+            print("file pred time:{}".format(time_5-time_1))
+    if total_action == 0:
+        print("No data found!")
+        return 0.0
+    print("Total replay time:{}".format(time.time() - time_0))
+    print("accuracy_action: {} / {} = {:.4f}".format(accuracy_action, total_action, accuracy_action / total_action))
+    return accuracy_action / total_action
 
 class CQLAgent(ChauffeurAgent):
     def __init__(self, net_kwargs={}, gamma=0.9, epsilon=0.05,
@@ -735,19 +764,13 @@ class CQLAgent(ChauffeurAgent):
             'std': 0.0
         }
 
-    def learn(self, transition_dict):
-        states = transition_dict.state
-        actions = np.expand_dims(transition_dict.action, axis=-1)
-        rewards = np.expand_dims(transition_dict.reward, axis=-1)
-        next_states = transition_dict.next_state
-        dones = np.expand_dims(transition_dict.done, axis=-1)
-
+    def learn(self, states, actions, rewards, next_states, dones):
         # 转换为tensor
-        states = torch.from_numpy(np.array(states)).float().to(self.device)
-        actions = torch.from_numpy(actions).long().to(self.device)
-        rewards = torch.from_numpy(rewards).float().to(self.device)
-        next_states = torch.from_numpy(np.array(next_states)).float().to(self.device)
-        dones = torch.from_numpy(dones).float().to(self.device)
+        states = states.to(self.device, non_blocking=True)
+        actions = actions.to(self.device, non_blocking=True)
+        rewards = rewards.to(self.device, non_blocking=True)
+        next_states = next_states.to(self.device, non_blocking=True)
+        dones = dones.to(self.device, non_blocking=True)
 
         # 添加奖励裁剪
         rewards = torch.clamp(rewards, min=self.min_q_value, max=self.max_q_value)
@@ -756,8 +779,9 @@ class CQLAgent(ChauffeurAgent):
         self.criterion = nn.HuberLoss(delta=1.0)
 
         # 计算常规TD误差
-        print("states->size:{}, actions->size:{}, rewards->size:{}, next_states->size:{}, dones->size:{}".\
-              format(states.size(), actions.size(), rewards.size(), next_states.size(), dones.size()))
+        # print("states->size:{}, actions->size:{}, rewards->size:{}, next_states->size:{}, dones->size:{}".\
+        #       format(states.size(), actions.size(), rewards.size(), next_states.size(), dones.size()))
+        # print("states.dtype:{}, actions.dtype:{}".format(states.dtype, actions.dtype))
         current_q = self.evaluate_net(states).gather(1, actions)
         with torch.no_grad():
             next_q_evaluate = self.evaluate_net(next_states)
