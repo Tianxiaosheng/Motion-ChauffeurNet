@@ -17,6 +17,10 @@ from motion_scenario_demo.waymo_data_load import WaymoScenarioDataset
 from waymo_open_dataset.protos.scenario_pb2 import Scenario
 from waymo_open_dataset.protos.scenario_pb2 import Track
 
+import multiprocessing as mp
+from multiprocessing import shared_memory
+import threading
+
 mph_to_ms = 0.44704
 
 def normalize_neg(x):
@@ -27,15 +31,22 @@ def normalize_pos(x):
             (1 + math.exp(-math.pow(x / 2, 3)))
 
 class Frame_Dataset(Dataset):
-    def __init__(self, observation_dim=(8, 100, 200), tf_file_path=None):
+    def __init__(self, observation_dim=(8, 100, 200), tf_file_path=None, caching=False):
         delta_x = 0.6
         delta_y = 0.6
         self.render = False
+        self.caching = caching
         self.tf_file_path = tf_file_path
         self.ogm = OccupancyGrid(observation_dim, delta_x=delta_x, delta_y=delta_y,
                                  render=self.render)
         self.frame_len = 0
         self.frame_index_list = []
+
+        if caching:
+            # 使用共享内存，支持多进程并行读取
+            self._init_shared_memory()
+        else:
+            self.frame_traj_pt_list = {}
 
         # 新增：场景缓存
         self._scenario_cache = {}
@@ -44,22 +55,115 @@ class Frame_Dataset(Dataset):
         self.scenarios = WaymoScenarioDataset(self.tf_file_path)
         self.calc_frame_len()
 
+    def __del__(self):
+        if hasattr(self, 'shm'):
+            try:
+                self.shm.close()
+            except Exception:
+                pass
+            try:
+                self.shm.unlink()
+            except FileNotFoundError:
+                # 只允许创建者unlink，其他进程ignore
+                pass
+
+    def _init_shared_memory(self):
+        """初始化共享内存，支持多进程并行访问"""
+        # 计算每个样本的大小（使用float16节省内存）
+        # state: (8, 100, 200) float16 = 8 * 100 * 200 * 2 = 320KB
+        # next_state: (8, 100, 200) float16 = 320KB
+        # action: (1,) int64 = 8B
+        # reward: (1,) float32 = 4B
+        # done: (1,) float32 = 4B
+        # 总计: 640KB + 16B ≈ 640KB per sample (节省50%内存)
+
+        self.max_samples = 40000  # 最大缓存样本数
+        sample_size = 8 * 100 * 200 * 2 * 2 + 8 + 4 + 4  # state + next_state + action + reward + done
+        total_size = sample_size * self.max_samples
+
+        # 创建共享内存
+        self.shm = shared_memory.SharedMemory(create=True, size=total_size)
+
+        # 创建共享内存视图，支持多进程并行访问
+        # 使用连续的内存布局，便于快速访问
+        offset = 0
+
+        # state 数组: (max_samples, 8, 100, 200) - 使用float16
+        state_size = 8 * 100 * 200 * 2  # float16 = 2 bytes
+        self.shared_states = np.ndarray((self.max_samples, 8, 100, 200), dtype=np.float16,
+                                       buffer=self.shm.buf[offset:offset + state_size * self.max_samples])
+        offset += state_size * self.max_samples
+
+        # next_state 数组: (max_samples, 8, 100, 200) - 使用float16
+        next_state_size = 8 * 100 * 200 * 2  # float16 = 2 bytes
+        self.shared_next_states = np.ndarray((self.max_samples, 8, 100, 200), dtype=np.float16,
+                                            buffer=self.shm.buf[offset:offset + next_state_size * self.max_samples])
+        offset += next_state_size * self.max_samples
+
+        # action 数组: (max_samples, 1)
+        action_size = 8
+        self.shared_actions = np.ndarray((self.max_samples, 1), dtype=np.int64,
+                                        buffer=self.shm.buf[offset:offset + action_size * self.max_samples])
+        offset += action_size * self.max_samples
+
+        # reward 数组: (max_samples, 1) - 保持float32以保证精度
+        reward_size = 4
+        self.shared_rewards = np.ndarray((self.max_samples, 1), dtype=np.float32,
+                                        buffer=self.shm.buf[offset:offset + reward_size * self.max_samples])
+        offset += reward_size * self.max_samples
+
+        # done 数组: (max_samples, 1) - 保持float32
+        done_size = 4
+        self.shared_dones = np.ndarray((self.max_samples, 1), dtype=np.float32,
+                                      buffer=self.shm.buf[offset:offset + done_size * self.max_samples])
+
+        # 缓存状态数组，支持多进程并行访问
+        self.cache_mask = mp.Array('b', self.max_samples)
+
+        # 线程锁，保护缓存写入操作
+        self._cache_lock = threading.Lock()
+
+        print(f"Shared memory initialized: {total_size / (1024*1024):.2f}MB for {self.max_samples} samples")
+
     def __len__(self):
         return self.frame_len
 
     def __getitem__(self, idx):
+        if self.caching and self.cache_mask[idx]:
+            # 直接从共享内存读取，无需序列化，支持多进程并行访问
+            # 注意：需要将float16转换为float32以保持兼容性
+            return (self.shared_states[idx].astype(np.float32).copy(),  # 转换为float32
+                   self.shared_actions[idx].copy(),
+                   self.shared_rewards[idx].copy(),
+                   self.shared_next_states[idx].astype(np.float32).copy(),  # 转换为float32
+                   self.shared_dones[idx].copy())
+
         scenario_idx, frame_idx = self.frame_index_list[idx]
-        #print("frame_idx:{}, scenario_idx:{}, frame_idx:{}".format(idx, scenario_idx, frame_idx))
+        # if self.caching:
+        #     print("list_size:{}, frame_idx:{}, scenario_idx:{}, frame_idx:{}".format(
+        #         sum(self.cache_mask), idx, scenario_idx, frame_idx))
         scenario = self._get_scenario_with_cache(scenario_idx)
 
-        state = self.get_observation_from_scenario(scenario, frame_idx).astype(np.float32)
-        next_state = self.get_observation_from_scenario(scenario, frame_idx+1).astype(np.float32)
+        state = self.get_observation_from_scenario(scenario, frame_idx)
+        next_state = self.get_observation_from_scenario(scenario, frame_idx+1)
 
         action = np.expand_dims(self.get_action_from_scenario(scenario, frame_idx), axis=-1)
         reward = np.expand_dims(self.get_reward_from_scenario(scenario, frame_idx), axis=-1).astype(np.float32)
         done = np.expand_dims(False, axis=-1).astype(np.float32)
 
-        return state, action, reward, next_state, done
+        if self.caching:
+            # 使用线程锁保护写入操作，支持多进程并行读取
+            with self._cache_lock:
+                if not self.cache_mask[idx]:  # 双重检查，避免重复写入
+                    # 将float32转换为float16以节省内存
+                    self.shared_states[idx] = state
+                    self.shared_next_states[idx] = next_state
+                    self.shared_actions[idx] = action
+                    self.shared_rewards[idx] = reward
+                    self.shared_dones[idx] = done
+                    self.cache_mask[idx] = True
+
+        return state.astype(np.float32), action, reward, next_state.astype(np.float32), done
 
     def _get_scenario_with_cache(self, scenario_idx):
         # 优先从缓存取

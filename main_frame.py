@@ -5,7 +5,7 @@ from dataset.frame_dataset import Frame_Dataset
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
-from network.models.ChauffeurAgent_frame import CQLAgent, play_qlearning, replay_from_memory
+from network.models.ChauffeurAgent_frame import CQLAgent, play_qlearning
 
 def plot_training_curves(stats, save_path='training_curves.png'):
     """绘制训练过程的各项指标"""
@@ -45,7 +45,8 @@ def iter_tf_files(folder_path, pattern=".tfrecord"):
 
 def main(num_epochs_training, train=False, view_time=False):
     # data for training
-    training_tf_folder_path = 'dataset/data/training_min_20s'
+    # training_tf_folder_path = 'dataset/data/training_min_20s'
+    training_tf_folder_path = '../data/training_20s'
     testing_tf_folder_path = 'dataset/data/testing_min_20s'
 
     time_0 = time.time()
@@ -63,7 +64,7 @@ def main(num_epochs_training, train=False, view_time=False):
         print("Agent init time:{}".format(time_1-time_0))
 
     print("replay_memory accuracy Before training:")
-    replay_from_memory(agent, testing_tf_folder_path, 400)
+    agent.replay_from_memory(testing_tf_folder_path, 2000)
     time_2 = time.time()
     if view_time:
         print("Replay_memory time before training:{}".format(time_2-time_1))
@@ -80,18 +81,19 @@ def main(num_epochs_training, train=False, view_time=False):
 
             time_3 = time.time()
             for tf_file_idx, tf_file_path in enumerate(file_path_list):
+                time_3_1 = time.time()
                 dataset = Frame_Dataset(observation_dim=(8, 100, 200), tf_file_path = tf_file_path)
 
-                epoch_stats = play_qlearning(agent, dataset, epoch % 5 == 0 and tf_file_idx == 0)
+                epoch_stats = play_qlearning(agent, dataset, tf_file_idx % 5 == 0)
                 agent.adjust_cql_alpha(epoch_stats['q_values'])
                 time_4 = time.time()
-                print("epoch {} file {}'s training time: {}".format(epoch, tf_file_idx, time_4 - time_3))
+                print("epoch {} file {}'s training time: {}".format(epoch, tf_file_idx, time_4 - time_3_1))
 
                 if tf_file_idx % 5 == 0:
                     # 计算Q值统计
                     q_stats = agent.get_q_value_stats(dataset)
                     # 计算动作匹配率
-                    action_match_rate = replay_from_memory(agent, testing_tf_folder_path, 400)
+                    action_match_rate = agent.replay_from_memory(testing_tf_folder_path, 2000)
 
                     training_stats['td_errors'].append(epoch_stats['td_error'])
                     training_stats['q_values'].append(q_stats)
@@ -99,9 +101,8 @@ def main(num_epochs_training, train=False, view_time=False):
 
                     print(f"Epoch {epoch}, File_index {tf_file_idx}")
                     print(f"TD Error: {epoch_stats['td_error']:.4f}")
-                    print(f"Action Match Rate: {action_match_rate:.4f}")
+                    #print(f"Action Match Rate: {action_match_rate:.4f}")
                     print(f"Q Values -> Mean: {q_stats['mean']:.4f}, Max: {q_stats['max']:.4f}")
-                time_3 = time.time()
             time_5 = time.time()
             print("epoch {} training time: {}".format(epoch, time_5 - time_3))
             # save nn model
@@ -110,14 +111,14 @@ def main(num_epochs_training, train=False, view_time=False):
             #     agent.save_model_params()
         agent.save_model_params()
         # 训练结束后绘制学习曲线
-        #plot_training_curves(training_stats, save_path=f'training_curves_{time.strftime("%Y%m%d_%H%M%S")}.png')
+        plot_training_curves(training_stats, save_path=f'training_curves_{time.strftime("%Y%m%d_%H%M%S")}.png')
     else:
         agent.load_model_params()
     time_6 = time.time()
-    
+
     print("Whole training time:{}".format(time_6-time_2))
     print("replay_memory accuracy After training:")
-    replay_from_memory(agent, testing_tf_folder_path, 400)
+    agent.replay_from_memory(testing_tf_folder_path, 2000)
 
 if __name__ == "__main__":
-    main(num_epochs_training=4, train=True, view_time=True)
+    main(num_epochs_training=1, train=True, view_time=True)

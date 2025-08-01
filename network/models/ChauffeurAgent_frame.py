@@ -646,7 +646,7 @@ def play_qlearning(agent, dataset, record=False):
         }
     }
 
-    train_dataloader = DataLoader(dataset, batch_size=agent.batch_size, shuffle=True, num_workers=8, pin_memory=True)
+    train_dataloader = DataLoader(dataset, batch_size=agent.batch_size, shuffle=True, num_workers=16, pin_memory=True)
     for batch_idx, (states, actions, rewards, next_states, dones) in enumerate(train_dataloader):
         batch_stats = agent.learn(states, actions, rewards, next_states, dones)
 
@@ -697,7 +697,7 @@ def replay_from_memory(agent, testing_tf_folder_path, batch_size=64, view_time=F
         print("memory_size (current file): {}".format(num_samples))
         time_2 = time.time()
         print("dataset init time:{}".format(time_2-time_1))
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=16, pin_memory=True)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True)
         time_3 = time.time()
         print("dataloader_init_time:{}".format(time_3-time_2))
         for batch_idx, (states, actions, rewards, next_states, dones) in enumerate(dataloader):
@@ -706,12 +706,9 @@ def replay_from_memory(agent, testing_tf_folder_path, batch_size=64, view_time=F
             time_4 = time.time()
             if view_time:
                 print("curr batch_idx:{}, loading time:{}".format(batch_idx, time_4 - time_3))
+
             with torch.no_grad():
-                # 如果states是numpy，转为tensor
-                if isinstance(states, np.ndarray):
-                    states = torch.from_numpy(states).float().to(agent.device)
-                elif isinstance(states, torch.Tensor):
-                    states = states.float().to(agent.device)
+                states = states.to(self.device, non_blocking=True)
                 # actions shape: [batch, 1] or [batch]
                 if isinstance(actions, torch.Tensor):
                     actions = actions.cpu().numpy()
@@ -763,6 +760,81 @@ class CQLAgent(ChauffeurAgent):
             'min': 0.0,
             'std': 0.0
         }
+        self.dataset_list = []
+        print("agent _init_!")
+
+    def replay_from_memory(self, testing_tf_folder_path, batch_size=64, view_time=False):
+        total_action = 0
+        accuracy_action = 0
+        time_0 = time.time()
+        print("-------start_replay_from_memory-------")
+        if len(self.dataset_list) == 0:
+            file_path_list = list(iter_tf_files(testing_tf_folder_path))
+            print("testing_file_size{}".format(len(file_path_list)))
+            for file_path in file_path_list:
+                self.dataset_list.append(Frame_Dataset(observation_dim=(8, 100, 200),\
+                        tf_file_path=file_path, caching=True))
+            time_1 = time.time()
+            print("dataset init time:{}".format(time_1-time_0))
+        for dataset in self.dataset_list:
+            time_2 = time.time()
+            num_samples = len(dataset)
+            if num_samples == 0:
+                continue
+            total_action += num_samples
+            print("memory_size (current file): {}".format(num_samples))
+
+            dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=16, pin_memory=True)
+            time_3 = time.time()
+            if view_time:
+                print("dataloader_init_time:{}".format(time_3-time_2))
+            for batch_idx, (states, actions, rewards, next_states, dones) in enumerate(dataloader):
+                # states: [batch, ...], actions: [batch, 1] or [batch]
+                # agent.decide应支持batch输入
+                time_4 = time.time()
+                if view_time:
+                    print("curr batch_idx:{}, loading time:{}".format(batch_idx, time_4 - time_3))
+
+                with torch.no_grad():
+                    # actions shape: [batch, 1] or [batch]
+                    if isinstance(actions, torch.Tensor):
+                        actions = actions.cpu().numpy()
+                    if actions.ndim > 1:
+                        actions = actions.squeeze(-1)
+                    # agent.decide支持batch输入
+                    pred_actions = self.decide(states)
+                    # pred_actions shape: [batch] or [batch, 1]
+                    if isinstance(pred_actions, torch.Tensor):
+                        pred_actions = pred_actions.cpu().numpy()
+                    if isinstance(pred_actions, np.ndarray) and pred_actions.ndim > 1:
+                        pred_actions = pred_actions.squeeze(-1)
+                    # 统计本batch准确个数
+                    match = (pred_actions == actions).sum()
+                    accuracy_action += match
+                    if batch_idx % 10 == 0:
+                        print("batch: {}, match: {}, batch_size: {}".format(batch_idx, match, len(actions)))
+                        all_action = np.stack([actions, pred_actions], axis=-1)
+                        # 随机截取100个数据
+                        if len(all_action) > 100:
+                            # 生成随机索引
+                            random_indices = np.random.choice(len(all_action), 100, replace=False)
+                            # 按索引截取数据
+                            sampled_actions = all_action[random_indices]
+                            print("compare_actions (sampled):{}".format(sampled_actions))
+                        else:
+                            print("compare_actions:{}".format(all_action))
+                    time_3 = time.time()
+                    if view_time:
+                        print("pred time:{}".format(time_3-time_4))
+            time_5 = time.time()
+            if view_time:
+                print("file pred time:{}".format(time_5-time_2))
+        if total_action == 0:
+            print("No data found!")
+            return 0.0
+        print("Total replay time:{}".format(time.time() - time_0))
+        print("accuracy_action: {} / {} = {:.4f}".format(accuracy_action, total_action, accuracy_action / total_action))
+        return accuracy_action / total_action
 
     def learn(self, states, actions, rewards, next_states, dones):
         # 转换为tensor

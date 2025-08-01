@@ -31,9 +31,8 @@ class WaymoScenarioDataset(Dataset):
 
         self.tfrecord_path = tfrecord_path
         # self.dataset = tf.data.TFRecordDataset(tfrecord_path, compression_type='')
-        print("正在缓存所有TFRecord帧到内存...")
         self._raw_records = list(tf.data.TFRecordDataset(tfrecord_path, compression_type=''))
-        print(f"已缓存 {len(self._raw_records)} 帧。")
+        print("已缓存{}tfrecord到内存..., 包含:{}个场景".format(tfrecord_path, len(self._raw_records)))
 
     def __len__(self):
         return len(self._raw_records)
