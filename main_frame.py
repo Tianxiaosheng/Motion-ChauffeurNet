@@ -5,7 +5,7 @@ from dataset.frame_dataset import Frame_Dataset
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
-from network.models.ChauffeurAgent_frame import CQLAgent, play_qlearning
+from network.models.A2C2Agent_frame import A2C2Agent, play_qlearning
 
 def plot_training_curves(stats, save_path='training_curves.png'):
     """绘制训练过程的各项指标"""
@@ -55,7 +55,7 @@ def main(num_epochs_training, train=False, view_time=False):
     gamma=0.9
     epsilon=0.00
     batch_size=1000
-    agent = CQLAgent(net_kwargs, gamma, epsilon, batch_size,\
+    agent = A2C2Agent(net_kwargs, gamma, epsilon, batch_size,\
                      observation_dim=(8, 100, 200), action_size=6,
                      offline_RL_data_path=training_tf_folder_path, cql_alpha=1.0)
 
