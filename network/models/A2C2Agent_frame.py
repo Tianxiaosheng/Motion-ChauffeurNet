@@ -15,9 +15,11 @@ DATASET_PATH = os.path.join(PROJ_PATH, 'dataset')
 
 sys.path.append(DATASET_PATH)
 
-FEATURE_PATH =  os.path.join(DATASET_PATH, "data/feature_model_net.pth")
+ACTOR_FEATURE_PATH =  os.path.join(DATASET_PATH, "data/actor_feature_model_net.pth")
+CRITIC_FEATURE_PATH = os.path.join(DATASET_PATH, "data/critic_feature_model_net.pth")
 ACTOR_PATH =  os.path.join(DATASET_PATH, "data/actor_model_net.pth")
 CRITIC_PATH = os.path.join(DATASET_PATH, "data/critic_model_net.pth")
+CRITIC_TARGET_PATH = os.path.join(DATASET_PATH, "data/critic_target_model_net.pth")
 
 def iter_tf_files(folder_path, pattern=".tfrecord"):
     for root, dirs, files in os.walk(folder_path):
@@ -25,7 +27,7 @@ def iter_tf_files(folder_path, pattern=".tfrecord"):
             if pattern in file:
                 yield os.path.join(root, file)
 
-def play_qlearning(agent, dataset, record=False):
+def play_a2c2(agent, dataset, record=False):
     if len(dataset) < agent.batch_size:
         print("repalymemory is not enough, please collect more data")
         return
@@ -111,10 +113,10 @@ class FeatureNet(nn.Module):
         #         conv2_height, conv2_width, pool2_output_size, hidden1_size, hidden2_size, output_size))
 
         self.conv_block = nn.Sequential(
-            nn.Conv2d(intput_channel_size, filter1_size, filter_width, padding=filter_pad),
+            nn.Conv2d(intput_channel_size, filter1_size, filter_width),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2, padding=filter_pad),
-            nn.Conv2d(filter1_size, filter2_size, filter_width, padding=filter_pad),
+            nn.Conv2d(filter1_size, filter2_size, filter_width),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2, padding=filter_pad)
         )
@@ -138,8 +140,8 @@ class FeatureNet(nn.Module):
         return self.pool2_output_size
 
 class A2C2Agent:
-    def __init__(self, actor_kwargs={'hidden_sizes': [64, 64], 'learning_rate': 0.001},\
-                 cirtic_kwargs={'hidden_sizes': [64, 64], 'learning_rate': 0.0003}, gamma=0.99, alpha=0.1,
+    def __init__(self, actor_kwargs={'hidden_sizes': [120, 84], 'learning_rate': 0.0005},\
+                 cirtic_kwargs={'hidden_sizes': [120, 84], 'learning_rate': 0.0005}, gamma=0.99, alpha=0.1,
                  batch_size=64, observation_dim=(4, 67, 133), action_size=3,
                  offline_RL_data_path=None, cql_alpha=0.01):
         self.observation_dim = observation_dim
@@ -153,9 +155,10 @@ class A2C2Agent:
         delta_y = 1.0
         self.render = False
         # 根据reward范围设置目标Q值量级
-        self.target_q_magnitude = -20.0  # 设置为reward范围的10%左右
-        self.min_q_value = -2000.0  # reward最小值
-        self.max_q_value = 0.0      # reward最大值
+        self.target_q_magnitude = -20.0   # 缩小目标Q值范围
+        self.min_q_value = -2000.0         # 缩小最小值范围
+        self.max_q_value = 0.0            # 保持不变
+
         # 初始化Q值统计信息
         self.current_q_stats = {
             'mean': 0.0,
@@ -164,33 +167,79 @@ class A2C2Agent:
             'std': 0.0
         }
         self.cql_alpha = cql_alpha
+        self.tau = 0.001  # 软更新系数
+        self.target_update_freq = 500  # 目标网络更新频率
 
-        # 特征提取网络
-        self.feature_net = nn.DataParallel(\
-                    FeatureNet(input_dim=self.observation_dim,\
-                               conv_param={'filter1_size': 6, 'filter2_size': 16,\
+        # Actor特征提取网络
+        self.actor_feature_net = nn.DataParallel(
+                    FeatureNet(input_dim=self.observation_dim,
+                               conv_param={'filter1_size': 6, 'filter2_size': 16,
                                             'filter_width': 5, 'pad': 0, 'stride': 1})).to(self.device)
-        self.feature_net_output_size = self.feature_net.module.get_output_size()
 
-        # 策略网络
+        # Critic特征提取网络
+        self.critic_feature_net = nn.DataParallel(
+                    FeatureNet(input_dim=self.observation_dim,
+                               conv_param={'filter1_size': 6, 'filter2_size': 16,
+                                            'filter_width': 5, 'pad': 0, 'stride': 1})).to(self.device)
+
+        self.feature_net_output_size = self.actor_feature_net.module.get_output_size()
+
+        # ACTOR-net - 去掉输出层的 Softmax
         self.actor_net = nn.DataParallel(\
                     self._build_network(input_size=self.feature_net_output_size,\
                                         hidden_sizes=actor_kwargs['hidden_sizes'],\
                                         output_size=action_size,\
-                                        output_activation=nn.Softmax)).to(self.device)
-        self.actor_optimizer = optim.Adam(self.actor_net.parameters(),\
-                                          lr=actor_kwargs.get('learning_rate', 0.001))
-        # 价值网络
-        self.critic_net = nn.DataParallel(\
-                    self._build_network(input_size=self.feature_net_output_size,\
-                                        hidden_sizes=cirtic_kwargs['hidden_sizes'],\
+                                        output_activation=None)).to(self.device)
+
+        # CRITIC-net
+        self.critic_net = nn.DataParallel(
+                    self._build_network(input_size=self.feature_net_output_size,
+                                        hidden_sizes=cirtic_kwargs['hidden_sizes'],
                                         output_size=action_size)).to(self.device)
-        self.critic_optimizer = optim.Adam(\
-                                          list(self.feature_net.parameters()) + list(self.critic_net.parameters()),\
+
+        # CRITIC-target-net - 复制 critic 网络
+        self.critic_target = nn.DataParallel(
+                    self._build_network(input_size=self.feature_net_output_size,
+                                        hidden_sizes=cirtic_kwargs['hidden_sizes'],
+                                        output_size=action_size)).to(self.device)
+        # 初始化目标网络参数与主网络相同
+        self.critic_target.load_state_dict(self.critic_net.state_dict())
+
+        # 创建分离的优化器
+        self.actor_feature_optimizer = optim.Adam(self.actor_feature_net.parameters(), lr=0.0001)
+        self.critic_feature_optimizer = optim.Adam(self.critic_feature_net.parameters(), lr=0.0001)
+        self.actor_optimizer = optim.Adam(self.actor_net.parameters(),
+                                        lr=actor_kwargs.get('learning_rate', 0.001))
+        self.critic_optimizer = optim.Adam(self.critic_net.parameters(),
                                           lr=cirtic_kwargs.get('learning_rate', 0.001))
+
+        # 添加学习率调度器
+        self.actor_feature_scheduler = optim.lr_scheduler.StepLR(self.actor_feature_optimizer, step_size=1000, gamma=0.95)
+        self.critic_feature_scheduler = optim.lr_scheduler.StepLR(self.critic_feature_optimizer, step_size=1000, gamma=0.95)
+        self.actor_scheduler = optim.lr_scheduler.StepLR(self.actor_optimizer, step_size=1000, gamma=0.95)
+        self.critic_scheduler = optim.lr_scheduler.StepLR(self.critic_optimizer, step_size=1000, gamma=0.95)
 
         self.dataset_list = []
         print("agent _init_!")
+
+        # 添加目标熵和温度参数
+        self.target_entropy = 1.2 * np.log(action_size)  # 增大目标熵
+        self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=1e-3)  # 增大学习率
+        self.temperature = 3.0  # 增大温度系数
+
+        # 调整网络学习率
+        actor_lr = actor_kwargs.get('learning_rate', 0.001) * 0.1  # 降低actor学习率
+        critic_lr = cirtic_kwargs.get('learning_rate', 0.001) * 0.2  # 降低critic学习率
+
+        # 重新配置优化器
+        self.actor_optimizer = optim.Adam(self.actor_net.parameters(), lr=actor_lr)
+        self.actor_feature_optimizer = optim.Adam(self.actor_feature_net.parameters(), lr=actor_lr)
+        self.critic_optimizer = optim.Adam(self.critic_net.parameters(), lr=critic_lr)
+        self.critic_feature_optimizer = optim.Adam(self.critic_feature_net.parameters(), lr=critic_lr)
+
+        # 使用Huber Loss替代MSE Loss，对异常值更不敏感
+        self.critic_criterion = nn.HuberLoss(delta=1.0)
 
 
     def _build_network(self, input_size, hidden_sizes, output_size,\
@@ -216,13 +265,24 @@ class A2C2Agent:
             obs = obs.unsqueeze(0)
             single = True
         with torch.no_grad():
-            feats = self.feature_net(obs)
-            probs = self.actor_net(feats)  # [B,A]
+            feats = self.actor_feature_net(obs)
+            logits = self.actor_net(feats)  # [B,A] - 输出是logits
+
+            # 使用温度参数
+            scaled_logits = logits / self.temperature
+            probs = torch.softmax(scaled_logits, dim=1)
+
             if deterministic:
-                act = torch.argmax(probs, dim=1)
+                act = torch.argmax(logits, dim=1)
             else:
+                # 训练时使用categorical采样
                 act = torch.distributions.Categorical(probs).sample()
         return act.item() if single else act
+
+    def soft_update_target(self):
+        """软更新目标网络"""
+        for target_param, param in zip(self.critic_target.parameters(), self.critic_net.parameters()):
+            target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
 
     def learn(self, states, actions, rewards, next_states, dones):
         # 转换为tensor
@@ -231,22 +291,35 @@ class A2C2Agent:
         rewards = rewards.to(self.device, non_blocking=True)
         next_states = next_states.to(self.device, non_blocking=True)
         dones = dones.to(self.device, non_blocking=True)
-        states_feature = self.feature_net(states)
-        next_states_feature = self.feature_net(next_states)
 
-        # 添加奖励裁剪
+        # 添加奖励裁剪和缩放
         rewards = torch.clamp(rewards, min=self.min_q_value, max=self.max_q_value)
-        actions = actions.long()
 
-        # 训练Critic
+        # 训练Critic - 使用目标网络
         self.critic_optimizer.zero_grad()
+        self.critic_feature_optimizer.zero_grad()
+        states_feature = self.critic_feature_net(states)
+        current_q_value = self.critic_net(states_feature).gather(1, actions)
+
         with torch.no_grad():
-            next_q_value = self.critic_net(next_states_feature).max(1)[0].view(-1, 1)
+            # Double DQN: 使用当前网络选择动作，目标网络计算值
+            next_states_feature = self.critic_feature_net(next_states)
+            next_states_feature_detached = next_states_feature.detach()
+
+            # 使用当前critic选择动作
+            next_q_current = self.critic_net(next_states_feature_detached)
+            next_actions = next_q_current.max(1)[1].unsqueeze(1)
+
+            # 使用目标网络计算目标Q值
+            next_q_target = self.critic_target(next_states_feature_detached)
+            next_q_value = next_q_target.gather(1, next_actions)
+
+            # 计算目标值并裁剪
             target_q_value = rewards + self.gamma * (1 - dones) * next_q_value
             target_q_value = torch.clamp(target_q_value, min=self.min_q_value, max=self.max_q_value)
 
-        current_q_value = self.critic_net(states_feature).gather(1, actions)
-        td_loss = nn.MSELoss()(current_q_value, target_q_value)
+        # 使用Huber Loss计算TD误差
+        td_loss = self.critic_criterion(current_q_value, target_q_value)
 
         # CQL正则化项
         q_values = self.critic_net(states_feature)
@@ -262,20 +335,88 @@ class A2C2Agent:
             scale = 1.0 + torch.abs(q_mean - self.target_q_magnitude) / abs(self.target_q_magnitude)
             cql_loss = cql_loss * scale
 
+        # 总损失
         critic_loss = td_loss + self.cql_alpha * cql_loss
-        critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(list(self.feature_net.parameters()) + list(self.critic_net.parameters()), 10.0)
+        critic_loss.backward()  # 不需要retain_graph
+
+        # 分别更新Critic和Critic特征网络
+        torch.nn.utils.clip_grad_norm_(self.critic_net.parameters(), 10.0)
         self.critic_optimizer.step()
 
-        # 训练Actor
+        torch.nn.utils.clip_grad_norm_(self.critic_feature_net.parameters(), 10.0)
+        self.critic_feature_optimizer.step()
+
+        # 软更新目标网络
+        if self.count % self.target_update_freq == 0:
+            self.soft_update_target()
+
+
+        # 训练Actor - 使用独立的特征网络
         self.actor_optimizer.zero_grad()
-        action_probs = self.actor_net(states_feature.detach())
-        log_prob_action = torch.log(action_probs.gather(1, actions).clamp(1e-10, 1.0))
-        advangete = (target_q_value - current_q_value).detach()
-        actor_loss = -(advangete * log_prob_action).mean()
+        self.actor_feature_optimizer.zero_grad()
+
+        # 使用Actor的特征网络
+        actor_states_feature = self.actor_feature_net(states)
+        action_logits = self.actor_net(actor_states_feature)
+
+        # 使用温度参数
+        scaled_logits = action_logits / self.temperature
+        log_probs = torch.log_softmax(scaled_logits, dim=1)
+        probs = torch.softmax(scaled_logits, dim=1)
+
+        # 计算动作频率权重
+        action_counts = torch.bincount(actions.squeeze(), minlength=self.action_n).float()
+        action_weights = (1.0 / (action_counts + 1e-6))
+        action_weights = action_weights / action_weights.sum()
+        sample_weights = action_weights[actions.squeeze()].unsqueeze(1)
+
+        log_prob_action = log_probs.gather(1, actions)
+
+        # 计算advantage并加权
+        with torch.no_grad():
+            actor_critic_q_values = self.critic_net(self.critic_feature_net(states))
+            state_values = (probs * actor_critic_q_values).sum(dim=1, keepdim=True)
+            current_q_for_advantage = actor_critic_q_values.gather(1, actions)
+            advantage = current_q_for_advantage - state_values
+
+            # 标准化和裁剪advantage
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+            advantage = torch.clamp(advantage, -1.0, 1.0)  # 收紧裁剪范围
+
+            # 计算熵和KL散度
+            entropy = -(probs * log_probs).sum(dim=1, keepdim=True)
+            uniform_probs = torch.ones_like(probs) / self.action_n
+            kl_div = (probs * (log_probs - torch.log(uniform_probs + 1e-8))).sum(dim=1, keepdim=True)
+
+        # 自适应调整熵系数
+        alpha = torch.exp(self.log_alpha)
+        alpha_loss = -(self.log_alpha * (entropy.detach() + self.target_entropy)).mean()
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
+
+        # 加权的actor loss，包含KL散度惩罚
+        weighted_advantage = advantage * sample_weights
+        actor_loss = -(weighted_advantage * log_prob_action + \
+                      alpha.detach() * entropy - \
+                      0.01 * kl_div).mean()  # 添加KL散度惩罚
         actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor_net.parameters(), 10.0)
+
+        # 更新Actor和Actor特征网络
+        torch.nn.utils.clip_grad_norm_(self.actor_net.parameters(), 1.0)
         self.actor_optimizer.step()
+
+        torch.nn.utils.clip_grad_norm_(self.actor_feature_net.parameters(), 1.0)
+        self.actor_feature_optimizer.step()
+
+        # 更新学习率调度器（降低频率）
+        if self.count % 100 == 0:
+            self.actor_feature_scheduler.step()
+            self.critic_feature_scheduler.step()
+            self.actor_scheduler.step()
+            self.critic_scheduler.step()
+
+        self.count += 1
 
         # 更新Q值统计信息
         with torch.no_grad():
@@ -290,6 +431,12 @@ class A2C2Agent:
             'td_loss': td_loss.item(),
             'cql_loss': cql_loss.item(),
             'total_loss': critic_loss.item(),
+            'actor_loss': actor_loss.item(),
+            'alpha_loss': alpha_loss.item(),
+            'alpha': alpha.item(),
+            'entropy': entropy.mean().item(),
+            'action_weights': action_weights.cpu().numpy(),
+            'action_distribution': probs.mean(0).detach().cpu().numpy(),
             'q_values': self.current_q_stats
         }
 
@@ -369,20 +516,30 @@ class A2C2Agent:
 
     def save_model_params(self):
         # 兼容单卡和多卡
-        feature_net = self.feature_net.module if hasattr(self.feature_net, "module") else self.feature_net
+        actor_feature_net = self.actor_feature_net.module if hasattr(self.actor_feature_net, "module") else self.actor_feature_net
+        critic_feature_net = self.critic_feature_net.module if hasattr(self.critic_feature_net, "module") else self.critic_feature_net
         actor_net = self.actor_net.module if hasattr(self.actor_net, "module") else self.actor_net
-        cirtic_net = self.critic_net.module if hasattr(self.critic_net, "module") else self.critic_net
-        torch.save(feature_net.state_dict(), FEATURE_PATH)
+        critic_net = self.critic_net.module if hasattr(self.critic_net, "module") else self.critic_net
+        critic_target_net = self.critic_target.module if hasattr(self.critic_target, "module") else self.critic_target
+
+        torch.save(actor_feature_net.state_dict(), ACTOR_FEATURE_PATH)
+        torch.save(critic_feature_net.state_dict(), CRITIC_FEATURE_PATH)
         torch.save(actor_net.state_dict(), ACTOR_PATH)
-        torch.save(cirtic_net.state_dict(), CRITIC_PATH)
+        torch.save(critic_net.state_dict(), CRITIC_PATH)
+        torch.save(critic_target_net.state_dict(), CRITIC_TARGET_PATH)
 
     def load_model_params(self):
-        feature_net = self.feature_net.module if hasattr(self.feature_net, "module") else self.feature_net
+        actor_feature_net = self.actor_feature_net.module if hasattr(self.actor_feature_net, "module") else self.actor_feature_net
+        critic_feature_net = self.critic_feature_net.module if hasattr(self.critic_feature_net, "module") else self.critic_feature_net
         actor_net = self.actor_net.module if hasattr(self.actor_net, "module") else self.actor_net
-        cirtic_net = self.critic_net.module if hasattr(self.critic_net, "module") else self.critic_net
-        feature_net.load_state_dict(torch.load(FEATURE_PATH, map_location=self.device))
+        critic_net = self.critic_net.module if hasattr(self.critic_net, "module") else self.critic_net
+        critic_target_net = self.critic_target.module if hasattr(self.critic_target, "module") else self.critic_target
+
+        actor_feature_net.load_state_dict(torch.load(ACTOR_FEATURE_PATH, map_location=self.device))
+        critic_feature_net.load_state_dict(torch.load(CRITIC_FEATURE_PATH, map_location=self.device))
         actor_net.load_state_dict(torch.load(ACTOR_PATH, map_location=self.device))
-        cirtic_net.load_state_dict(torch.load(CRITIC_PATH, map_location=self.device))
+        critic_net.load_state_dict(torch.load(CRITIC_PATH, map_location=self.device))
+        critic_target_net.load_state_dict(torch.load(CRITIC_TARGET_PATH, map_location=self.device))
 
     def adjust_cql_alpha(self, q_stats):
         """根据实际reward范围调整alpha"""
@@ -411,3 +568,22 @@ class A2C2Agent:
         self.cql_alpha = max(alpha_min, min(alpha_max, self.cql_alpha))
 
         return self.cql_alpha
+
+    def get_q_value_stats(self, dataset):
+        """获取Q值的统计信息"""
+        # 从回放缓冲区采样批数据
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, num_workers=16, pin_memory=True)
+        states, actions, rewards, next_states, dones = next(iter(dataloader))
+
+        # 计算Q值
+        with torch.no_grad():
+            states = states.to(self.device, non_blocking=True)
+            features = self.critic_feature_net(states)
+            q_values = self.critic_net(features)
+
+        return {
+            'mean': q_values.mean().item(),
+            'max': q_values.max().item(),
+            'min': q_values.min().item(),
+            'std': q_values.std().item()
+        }

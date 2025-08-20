@@ -626,7 +626,7 @@ class ChauffeurAgent:
 
         return self.cql_alpha
 
-def play_qlearning(agent, dataset, record=False):
+def play_fmcql(agent, dataset, record=False):
     if len(dataset) < agent.batch_size:
         print("repalymemory is not enough, please collect more data")
         return
@@ -708,7 +708,7 @@ def replay_from_memory(agent, testing_tf_folder_path, batch_size=64, view_time=F
                 print("curr batch_idx:{}, loading time:{}".format(batch_idx, time_4 - time_3))
 
             with torch.no_grad():
-                states = states.to(self.device, non_blocking=True)
+                states = states.to(agent.device, non_blocking=True)
                 # actions shape: [batch, 1] or [batch]
                 if isinstance(actions, torch.Tensor):
                     actions = actions.cpu().numpy()
