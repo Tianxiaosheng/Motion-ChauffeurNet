@@ -37,13 +37,14 @@ python dataset/motion_scenario_demo/plot_curr_state.py
 ```bash
 python main.py
 ```
+![显示特征场景训练数据](dataset/data/main.png)
 
 2.4 Train on most TFRecord files and test on a small held-out subset
 
 ```bash
 python main_frame.py
 ```
-
+![显示场景训练数据](dataset/data/main_frame.png)
 
 2.5 Launch a GUI to select a specific frame and view the  current ACC (acceleration) decision
 
