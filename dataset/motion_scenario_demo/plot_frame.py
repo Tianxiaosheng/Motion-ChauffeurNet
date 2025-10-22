@@ -99,7 +99,8 @@ def plot_frameshot(dataset, scenario_id=1, frame=101, size_pixels=1000):
     ax.set_ylabel('y')
     plt.show()
 
-FILENAME = '/home/uisee/Downloads/uncompressed_scenario_training_20s_training_20s.tfrecord-00006-of-01000'
+# FILENAME = '/home/uisee/Downloads/uncompressed_scenario_training_20s_training_20s.tfrecord-00006-of-01000'
+FILENAME = '/home/uisee/Documents/my_script/Motion-ChauffeurNet/dataset/data/testing_min_20s/training_20s.tfrecord-00006-of-01000'
 dataset = WaymoScenarioDataset(FILENAME)
 print(f"数据集大小: {len(dataset)}")
-plot_frameshot(dataset, 1, 101)
+plot_frameshot(dataset, 0, 101)

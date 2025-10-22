@@ -140,8 +140,8 @@ class FeatureNet(nn.Module):
         return self.pool2_output_size
 
 class A2C2Agent:
-    def __init__(self, actor_kwargs={'hidden_sizes': [120, 84], 'learning_rate': 0.0005},\
-                 cirtic_kwargs={'hidden_sizes': [120, 84], 'learning_rate': 0.0005}, gamma=0.99, alpha=0.1,
+    def __init__(self, actor_kwargs={'hidden_sizes': [120, 96, 64], 'learning_rate': 0.0002},\
+                 cirtic_kwargs={'hidden_sizes': [120, 96, 64], 'learning_rate': 0.0005}, gamma=0.99, alpha=0.1,
                  batch_size=64, observation_dim=(4, 67, 133), action_size=3,
                  offline_RL_data_path=None, cql_alpha=0.01):
         self.observation_dim = observation_dim
@@ -223,10 +223,10 @@ class A2C2Agent:
         print("agent _init_!")
 
         # 添加目标熵和温度参数
-        self.target_entropy = 1.2 * np.log(action_size)  # 增大目标熵
+        self.target_entropy = 1.8  # 增大目标熵
         self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=1e-3)  # 增大学习率
-        self.temperature = 3.0  # 增大温度系数
+        self.temperature = 1.5  # 增大温度系数
 
         # 调整网络学习率
         actor_lr = actor_kwargs.get('learning_rate', 0.001) * 0.1  # 降低actor学习率
@@ -350,7 +350,6 @@ class A2C2Agent:
         if self.count % self.target_update_freq == 0:
             self.soft_update_target()
 
-
         # 训练Actor - 使用独立的特征网络
         self.actor_optimizer.zero_grad()
         self.actor_feature_optimizer.zero_grad()
@@ -359,10 +358,27 @@ class A2C2Agent:
         actor_states_feature = self.actor_feature_net(states)
         action_logits = self.actor_net(actor_states_feature)
 
+        # === 诊断信息1: 检查Actor网络输出 ===
+        if self.count % 100 == 0:  # 每100步打印一次
+            print(f"\n=== Actor诊断信息 (Step {self.count}) ===")
+            print(f"Logits统计:")
+            print(f"  Mean per action: {action_logits.mean(dim=0).detach().cpu().numpy()}")
+            print(f"  Std per action: {action_logits.std(dim=0).detach().cpu().numpy()}")
+            print(f"  Max-Min差异: {(action_logits.max(dim=1)[0] - action_logits.min(dim=1)[0]).mean().item():.4f}")
+            print(f"  绝对最大值: {action_logits.abs().max().item():.4f}")
+
         # 使用温度参数
         scaled_logits = action_logits / self.temperature
         log_probs = torch.log_softmax(scaled_logits, dim=1)
         probs = torch.softmax(scaled_logits, dim=1)
+
+        # === 诊断信息2: 检查概率分布 ===
+        if self.count % 100 == 0:
+            print(f"概率分布:")
+            print(f"  平均概率: {probs.mean(dim=0).detach().cpu().numpy()}")
+            print(f"  最大概率均值: {probs.max(dim=1)[0].mean().item():.4f}")
+            print(f"  当前熵: {-(probs * log_probs).sum(dim=1).mean().item():.4f}")
+            print(f"  目标熵: {self.target_entropy:.4f}")
 
         # 计算动作频率权重
         action_counts = torch.bincount(actions.squeeze(), minlength=self.action_n).float()
@@ -375,13 +391,51 @@ class A2C2Agent:
         # 计算advantage并加权
         with torch.no_grad():
             actor_critic_q_values = self.critic_net(self.critic_feature_net(states))
-            state_values = (probs * actor_critic_q_values).sum(dim=1, keepdim=True)
-            current_q_for_advantage = actor_critic_q_values.gather(1, actions)
-            advantage = current_q_for_advantage - state_values
 
-            # 标准化和裁剪advantage
-            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-            advantage = torch.clamp(advantage, -1.0, 1.0)  # 收紧裁剪范围
+            # 使用AWR风格的优势处理（推荐）
+            current_q_for_advantage = actor_critic_q_values.gather(1, actions)
+
+            # 不使用基线，直接用Q值，然后用exp变换避免负值主导
+            raw_advantage = current_q_for_advantage
+
+            # 使用分位数进行归一化
+            q_percentile_10 = torch.quantile(raw_advantage, 0.1)
+            q_percentile_90 = torch.quantile(raw_advantage, 0.9)
+            relative_q = (raw_advantage - q_percentile_10) / (q_percentile_90 - q_percentile_10 + 1e-6)
+
+            # 使用tanh函数进行变换，将范围控制在[-5,5]
+            advantage_weights = torch.tanh(relative_q * 2) * 5.0
+
+            # 确保权重为正且有合适的范围
+            advantage_weights = (advantage_weights + 5.0) / 2.0  # 将[-5,5]映射到[0,5]
+
+            # 用权重替代advantage
+            advantage = advantage_weights
+
+            # === 诊断信息3: 检查Q值和AWR权重 ===
+            if self.count % 100 == 0:
+                print(f"Q值和AWR权重:")
+                print(f"  Q值均值per action: {actor_critic_q_values.mean(dim=0).detach().cpu().numpy()}")
+                print(f"  当前批次Q值范围: [{current_q_for_advantage.min().item():.4f}, {current_q_for_advantage.max().item():.4f}]")
+                print(f"  Q值10%分位数: {q_percentile_10.item():.4f}")
+                print(f"  Q值90%分位数: {q_percentile_90.item():.4f}")
+                print(f"  相对Q值范围: [{relative_q.min().item():.4f}, {relative_q.max().item():.4f}]")
+                print(f"  AWR权重: min={advantage_weights.min().item():.4f}, max={advantage_weights.max().item():.4f}")
+                print(f"  AWR权重均值: {advantage.mean().item():.4f}")
+                print(f"  AWR权重标准差: {advantage.std().item():.4f}")
+                print(f"  高权重样本比例(>3.0): {(advantage > 3.0).float().mean().item():.4f}")
+                print(f"  低权重样本比例(<1.0): {(advantage < 1.0).float().mean().item():.4f}")
+
+            # 不再进行额外的标准化，直接使用AWR权重
+            advantage_raw = advantage.clone()
+            # advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+            # advantage = torch.clamp(advantage, -1.0, 1.0)
+
+            # === 诊断信息4: 检查最终权重 ===
+            if self.count % 100 == 0:
+                print(f"  最终AWR权重范围: [{advantage.min().item():.4f}, {advantage.max().item():.4f}]")
+                print(f"  最终AWR权重均值: {advantage.mean().item():.4f}")
+                print(f"  权重变换效果: Q值→相对Q值→AWR权重→缩放")
 
             # 计算熵和KL散度
             entropy = -(probs * log_probs).sum(dim=1, keepdim=True)
@@ -395,12 +449,49 @@ class A2C2Agent:
         alpha_loss.backward()
         self.alpha_optimizer.step()
 
-        # 加权的actor loss，包含KL散度惩罚
+        # === 诊断信息5: 检查损失组件 ===
         weighted_advantage = advantage * sample_weights
+        policy_loss = -(weighted_advantage * log_prob_action).mean()
+        entropy_loss = alpha.detach() * entropy.mean()
+        kl_loss = 0.01 * kl_div.mean()
+
+        if self.count % 100 == 0:
+            print(f"损失组件:")
+            print(f"  Policy loss: {policy_loss.item():.6f}")
+            print(f"  Entropy loss: {entropy_loss.item():.6f}")
+            print(f"  KL loss: {kl_loss.item():.6f}")
+            print(f"  Alpha值: {alpha.item():.6f}")
+            print(f"  动作权重: {action_weights.cpu().numpy()}")
+
+        # 加权的actor loss，包含KL散度惩罚
         actor_loss = -(weighted_advantage * log_prob_action + \
                       alpha.detach() * entropy - \
-                      0.01 * kl_div).mean()  # 添加KL散度惩罚
+                      0.01 * kl_div).mean()
+
+        # === 诊断信息6: 检查梯度信息 ===
         actor_loss.backward()
+
+        if self.count % 100 == 0:
+            total_grad_norm = 0
+            param_count = 0
+            max_grad = 0
+            min_grad = float('inf')
+
+            print(f"梯度信息:")
+            for name, param in self.actor_net.named_parameters():
+                if param.grad is not None:
+                    grad_norm = param.grad.data.norm(2).item()
+                    total_grad_norm += grad_norm
+                    param_count += 1
+                    max_grad = max(max_grad, grad_norm)
+                    min_grad = min(min_grad, grad_norm)
+                    if grad_norm > 1e-6:  # 只打印有意义的梯度
+                        print(f"  {name}: norm={grad_norm:.8f}")
+
+            avg_grad_norm = total_grad_norm / max(param_count, 1)
+            print(f"  平均梯度norm: {avg_grad_norm:.8f}")
+            print(f"  最大梯度norm: {max_grad:.8f}")
+            print(f"  最小梯度norm: {min_grad:.8f}")
 
         # 更新Actor和Actor特征网络
         torch.nn.utils.clip_grad_norm_(self.actor_net.parameters(), 1.0)
@@ -411,10 +502,10 @@ class A2C2Agent:
 
         # 更新学习率调度器（降低频率）
         if self.count % 100 == 0:
-            self.actor_feature_scheduler.step()
-            self.critic_feature_scheduler.step()
             self.actor_scheduler.step()
+            self.actor_feature_scheduler.step()
             self.critic_scheduler.step()
+            self.critic_feature_scheduler.step()
 
         self.count += 1
 
@@ -437,7 +528,11 @@ class A2C2Agent:
             'entropy': entropy.mean().item(),
             'action_weights': action_weights.cpu().numpy(),
             'action_distribution': probs.mean(0).detach().cpu().numpy(),
-            'q_values': self.current_q_stats
+            'q_values': self.current_q_stats,
+            # 调试信息
+            'logits_max_diff': (action_logits.max(dim=1)[0] - action_logits.min(dim=1)[0]).mean().item(),
+            'max_prob': probs.max(dim=1)[0].mean().item(),
+            'advantage_positive_ratio': (advantage_raw > 5.0).float().mean().item(),  # AWR权重>5的比例
         }
 
     def replay_from_memory(self, testing_tf_folder_path, batch_size=64, view_time=False):

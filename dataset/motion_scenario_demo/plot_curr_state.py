@@ -284,14 +284,15 @@ def visualize_all_frames_of_scenario(example_np, idx, size_pixels=1000):
 
 # 主流程演示
 if __name__ == "__main__":
-    FILENAME = '/home/uisee/Downloads/uncompressed_scenario_training_20s_training_20s.tfrecord-00006-of-01000'
+    #FILENAME = '/home/uisee/Downloads/uncompressed_scenario_training_20s_training_20s.tfrecord-00006-of-01000'
+    FILENAME = '/home/uisee/Documents/my_script/Motion-ChauffeurNet/dataset/data/testing_min_20s/training_20s.tfrecord-00006-of-01000'
     dataset = WaymoScenarioDataset(FILENAME)
     print(f"数据集大小: {len(dataset)}")
 
-    images = visualize_all_frames_of_scenario(dataset.to_numpy_dict(1), 1)
+    images = visualize_all_frames_of_scenario(dataset.to_numpy_dict(2), 2)
     print(f"成功生成 {len(images)} 帧图像")
 
     anim = create_animation(images[::10])
     #anim = create_animation(images)
-    anim.save('curr_state_animation.mp4', fps=10, extra_args=['-vcodec', 'libx264'])
-    print("动画已保存为 curr state animation.mp4") 
+    anim.save('scenario_animation.mp4', fps=10, extra_args=['-vcodec', 'libx264'])
+    print("动画已保存为 scenario animation.mp4")

@@ -60,7 +60,7 @@ def main_A2C2(num_epochs_training, train=False, view_time=False):
     batch_size=1000
     agent = A2C2Agent(gamma=gamma, batch_size=batch_size,\
                      observation_dim=(8, 100, 200), action_size=6,
-                     offline_RL_data_path=training_tf_folder_path, cql_alpha=1.0)  # 降低CQL强度
+                     offline_RL_data_path=training_tf_folder_path, cql_alpha=0.8)  # 降低CQL强度
 
     time_1 = time.time()
     if view_time:
@@ -107,6 +107,10 @@ def main_A2C2(num_epochs_training, train=False, view_time=False):
                     print(f"CQL Alpha: {agent.cql_alpha:.4f}")  # 添加CQL alpha监控
                     print(f"Actor LR: {agent.actor_optimizer.param_groups[0]['lr']:.6f}")  # 监控学习率
                     print(f"Entropy: {epoch_stats.get('entropy', 0):.4f}")  # 监控熵值
+                    print(f"Alpha: {epoch_stats.get('alpha', 0):.4f}")  # 监控熵系数
+                    print(f"Logits Max Diff: {epoch_stats.get('logits_max_diff', 0):.4f}")  # logits差异
+                    print(f"Max Prob: {epoch_stats.get('max_prob', 0):.4f}")  # 最大概率
+                    print(f"AWR Positive Ratio: {epoch_stats.get('advantage_positive_ratio', 0):.4f}")  # AWR权重比例
                     if 'action_distribution' in epoch_stats:
                         action_dist = epoch_stats['action_distribution']
                         print(f"Action Distribution: {[f'{x:.3f}' for x in action_dist]}")
@@ -210,6 +214,7 @@ def main_FMCQL(num_epochs_training, train=False, view_time=False):
 
 
 # algo = 'FMCQL'
+# Advantage Actor-Critic with CQL
 algo = 'A2C2'
 
 if __name__ == "__main__":
